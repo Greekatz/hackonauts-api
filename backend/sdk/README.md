@@ -5,12 +5,12 @@ Lightweight Python SDK for automatic log collection, metrics tracking, and incid
 ## Installation
 
 ```bash
-pip install sra
+pip install sra-sdk
 ```
 
 For system metrics collection:
 ```bash
-pip install sra[metrics]
+pip install sra-sdk[metrics]
 ```
 
 ## Quick Start
@@ -18,7 +18,7 @@ pip install sra[metrics]
 ### Basic Logging
 
 ```python
-from sra import SRALogger
+from sra_sdk import SRALogger
 
 logger = SRALogger(
     api_key="your-api-key",
@@ -36,7 +36,7 @@ logger.error("Database connection failed", extra={"db_host": "localhost"})
 
 ```python
 import logging
-from sra import SRAHandler
+from sra_sdk import SRAHandler
 
 handler = SRAHandler(
     api_key="your-api-key",
@@ -52,7 +52,7 @@ logging.error("Errors are captured automatically")
 ### Metrics Collection
 
 ```python
-from sra import MetricsCollector
+from sra_sdk import MetricsCollector
 
 metrics = MetricsCollector(
     api_key="your-api-key",
@@ -71,7 +71,7 @@ metrics.start_system_metrics(interval=30)
 ### Exception Capture
 
 ```python
-from sra import SRALogger, capture_exceptions
+from sra_sdk import SRALogger, capture_exceptions
 
 logger = SRALogger(api_key="your-key", capture_exceptions=True)
 
