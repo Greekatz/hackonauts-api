@@ -9,8 +9,8 @@ with open("README.md", "r", encoding="utf-8") as f:
 setup(
     name="sra",
     version="0.1.0",
-    author="Hackonauts Team",
-    author_email="team@hackonauts.dev",
+    author="SRA Team",
+    author_email="team@sra.dev",
     description="System Reliability Assistant - SDK for automatic incident detection and response",
     long_description=long_description,
     long_description_content_type="text/markdown",

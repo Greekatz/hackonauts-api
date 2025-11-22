@@ -3,7 +3,7 @@ Data Models for the Incident Response Backend
 """
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import uuid
 
@@ -32,7 +32,7 @@ class IncidentStatus(str, Enum):
 
 
 class LogEntry(BaseModel):
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     level: LogLevel = LogLevel.INFO
     message: str
     source: Optional[str] = None
@@ -42,7 +42,7 @@ class LogEntry(BaseModel):
 
 
 class MetricEntry(BaseModel):
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     name: str
     value: float
     unit: Optional[str] = None
@@ -51,7 +51,7 @@ class MetricEntry(BaseModel):
 
 
 class MetricsSnapshot(BaseModel):
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     cpu_percent: Optional[float] = None
     memory_percent: Optional[float] = None
     latency_ms: Optional[float] = None
@@ -87,7 +87,7 @@ class RecoveryAction(BaseModel):
 
 
 class StabilityReport(BaseModel):
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_stable: bool = False
     metrics_ok: bool = False
     logs_ok: bool = False
@@ -98,8 +98,8 @@ class StabilityReport(BaseModel):
 
 class Incident(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     status: IncidentStatus = IncidentStatus.OPEN
     severity: IncidentSeverity = IncidentSeverity.MEDIUM
     title: str = ""
