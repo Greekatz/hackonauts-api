@@ -8,7 +8,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="sra-sdk",
-    version="0.1.0",
+    version="0.1.1",
     author="SRA Team",
     author_email="team@sra.dev",
     description="System Reliability Assistant - SDK for automatic incident detection and response",
