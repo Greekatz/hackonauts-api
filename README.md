@@ -2,112 +2,100 @@
 
 An autonomous incident detection and response platform powered by IBM watsonx. The system ingests logs and metrics, detects anomalies, performs root cause analysis, and executes automated remediation actions.
 
-## Architecture Overview
+## Quick Start (For Users)
 
-```
-+-------------------+     +-------------------+     +-------------------+
-|   Your Services   | --> |   SRA SDK         | --> |   Backend API     |
-|   (with SRA SDK)  |     |   (Log/Metrics)   |     |   (FastAPI)       |
-+-------------------+     +-------------------+     +-------------------+
-                                                            |
-                          +-------------------+             |
-                          |   watsonx Agent   | <-----------+
-                          |   (RCA/Planning)  |             |
-                          +-------------------+             |
-                                                            v
-                          +-------------------+     +-------------------+
-                          |   Notifications   | <-- |   Auto-Healing    |
-                          |   (Slack/Email)   |     |   (Remediation)   |
-                          +-------------------+     +-------------------+
-```
-
-## Components
-
-### Backend API (`/backend`)
-
-Production-grade FastAPI backend with the following modules:
-
-| Module | Path | Description |
-|--------|------|-------------|
-| Core | `/backend/core/` | Configuration, data models, logging |
-| Engines | `/backend/engines/` | Ingestion, anomaly detection, stability evaluation, state management |
-| Integrations | `/backend/integrations/` | watsonx agent client, auto-healing, notifications |
-| Utils | `/backend/utils/` | CLI tool, mock data generator |
-| SDK | `/backend/sdk/` | System Reliability Assistant Python SDK |
-
-### System Reliability Assistant SDK (`/backend/sdk`)
-
-Lightweight Python SDK for automatic log collection and metrics tracking.
-
-## Installation
-
-### Backend
+### 1. Create an Account
 
 ```bash
-cd backend
-pip install -r requirements.txt
-python main.py
+curl -X POST https://your-sra-backend.com/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "your-secure-password"}'
 ```
 
-The server runs at `http://localhost:8000`. API documentation is available at `http://localhost:8000/docs`.
+Response:
+```json
+{
+  "access_token": "eyJhbGc...",
+  "token_type": "bearer",
+  "user": {"id": "...", "email": "you@example.com", ...}
+}
+```
 
-### SDK (for your applications)
+### 2. Generate an API Key
 
 ```bash
-pip install sra
+curl -X POST https://your-sra-backend.com/api-keys \
+  -H "Authorization: Bearer eyJhbGc..." \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-production-app"}'
 ```
 
-## Configuration
-
-Copy the environment variables to your `.env` file:
-
-```env
-# watsonx Integration
-WATSONX_API_KEY=your-api-key
-WATSONX_PROJECT_ID=your-project-id
-WATSONX_AGENT_URL=https://your-watsonx-agent-endpoint
-
-# API Security
-API_KEY=your-backend-api-key
-
-# Notifications (optional)
-SLACK_WEBHOOK_URL=
-DISCORD_WEBHOOK_URL=
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=
-SMTP_PASSWORD=
-
-# Ticketing (optional)
-JIRA_URL=
-JIRA_USER=
-JIRA_API_TOKEN=
-JIRA_PROJECT_KEY=
+Response:
+```json
+{
+  "key": "sra_a1b2c3d4e5f6...",
+  "name": "my-production-app",
+  "created_at": "2025-01-01T00:00:00Z",
+  "is_active": true
+}
 ```
 
-## Usage
+Save this key - you'll use it in your application. You can create up to 3 API keys per account.
 
-### Integrating the SDK
+### 3. Integrate into Your Application
+
+#### Option A: Direct API (Any Language)
+
+```bash
+# Send logs
+curl -X POST https://your-sra-backend.com/ingest/logs \
+  -H "X-API-Key: sra_a1b2c3d4e5f6..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "logs": [
+      {"level": "error", "message": "Database connection timeout", "service": "api-gateway"},
+      {"level": "warning", "message": "High memory usage detected", "service": "api-gateway"}
+    ]
+  }'
+
+# Send metrics
+curl -X POST https://your-sra-backend.com/ingest/snapshot \
+  -H "X-API-Key: sra_a1b2c3d4e5f6..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "snapshot": {
+      "cpu_percent": 85.5,
+      "memory_percent": 72.0,
+      "error_rate": 0.05,
+      "latency_ms": 250
+    }
+  }'
+```
+
+#### Option B: Python SDK
+
+```bash
+pip install sra-sdk
+```
 
 ```python
-from sra import SRALogger, MetricsCollector
+from sra_sdk import SRALogger, MetricsCollector
 
 # Initialize logger
 logger = SRALogger(
-    api_key="your-api-key",
-    endpoint="https://your-backend.com",
-    service="my-service",
-    environment="production"
+    api_key="sra_a1b2c3d4e5f6...",
+    endpoint="https://your-sra-backend.com",
+    service="my-service"
 )
 
-# Log events
+# Send logs
 logger.info("Application started")
 logger.error("Database connection failed", extra={"db_host": "localhost"})
 
 # Initialize metrics
 metrics = MetricsCollector(
-    api_key="your-api-key",
-    endpoint="https://your-backend.com",
+    api_key="sra_a1b2c3d4e5f6...",
+    endpoint="https://your-sra-backend.com",
     service="my-service"
 )
 
@@ -116,200 +104,259 @@ metrics.gauge("active_users", 150)
 metrics.counter("requests_total")
 metrics.timing("request_duration_ms", 45.2)
 
-# Auto-collect system metrics
+# Auto-collect system metrics (CPU, memory, etc.)
 metrics.start_system_metrics(interval=30)
 ```
 
-### Using with Python Logging
+#### Option C: Python Logging Integration
 
 ```python
 import logging
-from sra import SRAHandler
+from sra_sdk import SRAHandler
 
+# Add SRA handler to your existing logging
 handler = SRAHandler(
-    api_key="your-api-key",
-    endpoint="https://your-backend.com",
+    api_key="sra_a1b2c3d4e5f6...",
+    endpoint="https://your-sra-backend.com",
     service="my-service"
 )
 logging.root.addHandler(handler)
 
-# All standard logging now goes to the platform
-logging.info("This is captured by SRA")
+# Your existing logging code now sends to SRA
+logging.info("User logged in")
+logging.error("Payment failed", extra={"user_id": "123"})
 ```
 
-### CLI Tool
+### 4. View Incidents
+
+When SRA detects anomalies, it automatically creates incidents:
 
 ```bash
-# Check backend health
-python -m backend.utils.cli health
+# List all incidents
+curl -H "X-API-Key: sra_a1b2c3d4e5f6..." \
+  https://your-sra-backend.com/incidents
 
-# Generate a mock incident for testing
-python -m backend.utils.cli generate-incident --type database
+# Get incident details
+curl -H "X-API-Key: sra_a1b2c3d4e5f6..." \
+  https://your-sra-backend.com/incidents/{incident_id}
 
-# List incidents
-python -m backend.utils.cli list-incidents
-
-# Trigger agent for an incident
-python -m backend.utils.cli trigger-agent <incident_id>
-
-# Check system stability
-python -m backend.utils.cli check-stability
-
-# Execute auto-heal action
-python -m backend.utils.cli autoheal restart my-service
+# Get incident summary with RCA
+curl -H "X-API-Key: sra_a1b2c3d4e5f6..." \
+  https://your-sra-backend.com/incidents/{incident_id}/summary
 ```
 
-## API Endpoints
+---
 
-### Health and Status
+## Account Management
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Health check |
-| GET | `/status` | System status |
+### Login (Get New Token)
 
-### Log and Metrics Ingestion
+```bash
+curl -X POST https://your-sra-backend.com/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "your-password"}'
+```
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/ingest/logs` | Ingest structured logs |
-| POST | `/ingest/logs/raw` | Ingest raw log strings |
-| POST | `/ingest/metrics` | Ingest metrics |
-| POST | `/ingest/snapshot` | Ingest metrics snapshot |
+### View Your Profile
 
-### Anomaly Detection
+```bash
+curl -H "Authorization: Bearer your-token" \
+  https://your-sra-backend.com/auth/me
+```
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/anomaly/status` | Get anomaly detection status |
-| POST | `/anomaly/force-incident` | Force incident mode |
+### List Your API Keys
 
-### Agent and RCA
+```bash
+curl -H "Authorization: Bearer your-token" \
+  https://your-sra-backend.com/api-keys
+```
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/agent/trigger` | Trigger agent for incident |
-| POST | `/agent/force-rca` | Force RCA with provided data |
+### Revoke an API Key
 
-### Stability
+```bash
+curl -X DELETE -H "Authorization: Bearer your-token" \
+  https://your-sra-backend.com/api-keys/sra_a1b2c3
+```
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/stability/check` | Check system stability |
-| POST | `/stability/set-baseline` | Set stability baseline |
+### Delete an API Key Permanently
 
-### Auto-Healing
+```bash
+curl -X DELETE -H "Authorization: Bearer your-token" \
+  https://your-sra-backend.com/api-keys/sra_a1b2c3/delete
+```
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/autoheal/restart` | Restart a service |
-| POST | `/autoheal/scale` | Scale service replicas |
-| POST | `/autoheal/flush` | Flush cache |
-| POST | `/autoheal/clear-queue` | Clear message queue |
-| POST | `/autoheal/reroute` | Reroute traffic |
-| POST | `/autoheal/rollback` | Rollback deployment |
-| GET | `/autoheal/actions` | List available actions |
+---
 
-### Incident Management
+## What SRA Detects
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/incidents` | List incidents |
-| GET | `/incidents/{id}` | Get incident details |
-| GET | `/incidents/{id}/summary` | Get incident summary |
-| GET | `/incidents/{id}/history` | Get incident history |
-| POST | `/incidents/{id}/resolve` | Resolve incident |
-| POST | `/incidents/{id}/close` | Close incident |
+| Anomaly Type | Detection Method |
+|--------------|------------------|
+| High Error Rate | Error logs exceed 5% of total |
+| CPU Overload | CPU usage > 85% |
+| Memory Pressure | Memory usage > 90% |
+| Latency Spikes | Response time > 2000ms |
+| Database Issues | Connection timeout/refused patterns |
+| Disk Full | Disk space warnings |
+| Network Errors | Connection reset patterns |
 
-### Notifications
+---
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/notify/{incident_id}` | Send notifications |
-| POST | `/notify/custom` | Send custom notification |
+## Auto-Healing Actions
 
-### Testing
+When incidents are detected, SRA can automatically execute remediation:
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/mock/generate-incident` | Generate mock incident |
-| POST | `/mock/generate-logs` | Generate mock logs |
-| POST | `/mock/generate-metrics` | Generate mock metrics |
-| GET | `/mock/incident-types` | List mock incident types |
+| Action | Description |
+|--------|-------------|
+| Restart Service | Restart via Docker, Kubernetes, or systemd |
+| Scale Replicas | Increase service instances |
+| Flush Cache | Clear Redis/Memcached |
+| Clear Queue | Drain message queues |
+| Reroute Traffic | Redirect to healthy endpoints |
+| Rollback | Revert to previous deployment |
 
-## Features
+---
 
-### Anomaly Detection
-
-- Error rate spike detection
-- Latency outlier detection
-- CPU and memory threshold monitoring
-- Known failure pattern matching (database, memory, disk, network issues)
-- Configurable thresholds
-
-### Auto-Healing Actions
-
-- Service restart (Docker, Kubernetes, systemd)
-- Replica scaling
-- Cache flushing (Redis, Memcached)
-- Queue clearing (RabbitMQ, Redis)
-- Traffic rerouting
-- Deployment rollback
-- Dry-run mode for testing
-
-### Notification Channels
-
-- Slack (webhook)
-- Discord (webhook)
-- Email (SMTP)
-- Jira (ticket creation)
-- ServiceNow (incident creation)
-
-### Stability Evaluation
-
-- Metrics threshold checking
-- Log error rate analysis
-- Baseline comparison
-- Trend analysis (stable, improving, degrading, critical)
-- Agent re-run logic based on stability
-
-## Project Structure
+## Architecture Overview
 
 ```
-hackonauts-api/
-├── .env                    # Environment configuration
-├── README.md               # This file
-└── backend/
-    ├── main.py             # FastAPI application entry point
-    ├── requirements.txt    # Python dependencies
-    ├── core/
-    │   ├── __init__.py
-    │   ├── config.py       # Configuration management
-    │   ├── models.py       # Pydantic data models
-    │   └── logger.py       # Structured logging
-    ├── engines/
-    │   ├── __init__.py
-    │   ├── ingestion.py    # Log/metrics ingestion and parsing
-    │   ├── anomaly_detection.py  # Anomaly detection engine
-    │   ├── stability.py    # Stability evaluation
-    │   └── state_manager.py # Incident state management
-    ├── integrations/
-    │   ├── __init__.py
-    │   ├── agent_client.py # watsonx agent client
-    │   ├── autoheal.py     # Auto-healing execution
-    │   └── notifications.py # Notification services
-    ├── utils/
-    │   ├── __init__.py
-    │   ├── cli.py          # Command-line interface
-    │   └── mock_data.py    # Mock data generator
-    └── sdk/
-        ├── __init__.py
-        ├── client.py       # SRA HTTP client
-        ├── logger.py       # SRALogger, SRAHandler
-        ├── metrics.py      # MetricsCollector
-        ├── setup.py        # PyPI package configuration
-        └── README.md       # SDK documentation
++-------------------+     +-------------------+     +-------------------+
+|   Your Services   | --> |   SRA API/SDK     | --> |   Backend API     |
+|   (with API Key)  |     |   (Log/Metrics)   |     |   (PostgreSQL)    |
++-------------------+     +-------------------+     +-------------------+
+                                                           |
+                         +-------------------+             |
+                         |   watsonx Agent   | <-----------+
+                         |   (RCA/Planning)  |             |
+                         +-------------------+             |
+                                                           v
+                         +-------------------+     +-------------------+
+                         |   Notifications   | <-- |   Auto-Healing    |
+                         |   (Slack/Email)   |     |   (Remediation)   |
+                         +-------------------+     +-------------------+
 ```
+
+---
+
+## API Reference
+
+### Authentication
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/auth/register` | None | Create account |
+| POST | `/auth/login` | None | Login, get token |
+| POST | `/auth/logout` | Bearer | Logout |
+| GET | `/auth/me` | Bearer | Get profile |
+
+### API Keys
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/api-keys` | Bearer | Create key (max 3) |
+| GET | `/api-keys` | Bearer | List your keys |
+| DELETE | `/api-keys/{prefix}` | Bearer | Revoke key |
+| DELETE | `/api-keys/{prefix}/delete` | Bearer | Delete key |
+
+### Data Ingestion
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/ingest/logs` | API Key | Send structured logs |
+| POST | `/ingest/logs/raw` | API Key | Send raw log strings |
+| POST | `/ingest/metrics` | API Key | Send metrics |
+| POST | `/ingest/snapshot` | API Key | Send metrics snapshot |
+
+### Incidents
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/incidents` | API Key | List incidents |
+| GET | `/incidents/{id}` | API Key | Get incident details |
+| GET | `/incidents/{id}/summary` | API Key | Get summary with RCA |
+| POST | `/incidents/{id}/resolve` | API Key | Mark resolved |
+| POST | `/incidents/{id}/close` | API Key | Close incident |
+
+### Monitoring
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/health` | None | Health check |
+| GET | `/status` | API Key | System status |
+| GET | `/anomaly/status` | API Key | Anomaly detection status |
+| GET | `/stability/check` | API Key | Stability check |
+
+---
+
+## Self-Hosting
+
+### Prerequisites
+
+- Python 3.8+
+- PostgreSQL 13+
+- IBM watsonx account (for RCA)
+
+### Installation
+
+```bash
+git clone https://github.com/Greekatz/hackonauts-api.git
+cd hackonauts-api/backend
+
+# Install dependencies
+pip install -r requirements.txt
+pip install sqlalchemy asyncpg
+
+# Create PostgreSQL database
+createdb sra
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your settings
+
+# Run the server
+python main.py
+```
+
+### Environment Variables
+
+```env
+# Database (PostgreSQL)
+DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/sra
+
+# Admin API Key (generate a strong key)
+ADMIN_API_KEY=sra_admin_your_secure_key_here
+
+# watsonx Integration
+WATSONX_API_KEY=your-watsonx-api-key
+WATSONX_PROJECT_ID=your-project-id
+WATSONX_AGENT_URL=https://your-watsonx-agent-endpoint
+
+# Notifications (optional)
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your-email
+SMTP_PASSWORD=your-password
+```
+
+The server runs at `http://localhost:8000`. API docs at `http://localhost:8000/docs`.
+
+---
+
+## SDK Installation
+
+```bash
+pip install sra-sdk
+```
+
+For system metrics (CPU, memory):
+```bash
+pip install sra-sdk[metrics]
+```
+
+PyPI: https://pypi.org/project/sra-sdk/
+
+---
 
 ## License
 

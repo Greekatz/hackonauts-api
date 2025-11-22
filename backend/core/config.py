@@ -19,10 +19,11 @@ class ThresholdConfig(BaseModel):
 
 
 class Config:
-    # API Keys
+    # WatsonX Orchestrate
     WATSONX_API_KEY: str = os.getenv("WATSONX_API_KEY", "")
-    WATSONX_PROJECT_ID: str = os.getenv("WATSONX_PROJECT_ID", "")
-    WATSONX_AGENT_URL: str = os.getenv("WATSONX_AGENT_URL", "")
+    WATSONX_INSTANCE_ID: str = os.getenv("WATSONX_INSTANCE_ID", "")
+    WATSONX_AGENT_ID: str = os.getenv("WATSONX_AGENT_ID", "")
+    WATSONX_URL: str = os.getenv("WATSONX_URL", "")
 
     # Slack Integration
     SLACK_WEBHOOK_URL: str = os.getenv("SLACK_WEBHOOK_URL", "")
@@ -54,8 +55,8 @@ class Config:
     # Redis (for buffering)
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
 
-    # API Security
-    API_KEY: str = os.getenv("API_KEY", "dev-api-key-change-me")
+    # Admin API Key (for server-to-server / admin operations)
+    ADMIN_API_KEY: str = os.getenv("ADMIN_API_KEY", "")
 
     # Thresholds
     THRESHOLDS: ThresholdConfig = ThresholdConfig()

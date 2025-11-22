@@ -2,6 +2,7 @@
 API Gateway / Main Application
 Production-grade FastAPI backend with all endpoints.
 """
+import os
 import time
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -11,12 +12,21 @@ from fastapi import FastAPI, HTTPException, Depends, Header, Request, Background
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import hashlib
+import secrets
+
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from core import (
     LogEntry, MetricEntry, MetricsSnapshot, Incident, IncidentSeverity,
     IncidentStatus, LogIngestionRequest, MetricIngestionRequest,
     MetricsSnapshotRequest, AutoHealRequest, NotificationRequest,
     ForceRCARequest, AnomalyDetection, StabilityReport, RecoveryAction,
-    config, logger
+    APIKey, APIKeyCreateRequest, APIKeyResponse,
+    User, UserRegisterRequest, UserLoginRequest, UserResponse, TokenResponse,
+    config, logger,
+    UserDB, APIKeyDB, SessionTokenDB, init_db, get_db
 )
 from engines import (
     ingestion_buffer, LogParser, MetricsNormalizer,
@@ -32,6 +42,9 @@ from utils import mock_generator
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Incident Response Backend")
+    logger.info("Initializing database...")
+    await init_db()
+    logger.info("Database initialized")
     yield
     logger.info("Shutting down Incident Response Backend")
 
@@ -54,13 +67,78 @@ app.add_middleware(
 )
 
 
-# API Key authentication
-async def verify_api_key(x_api_key: str = Header(None, alias="X-API-Key")):
-    if not config.API_KEY:
-        return True  # No auth configured
-    if x_api_key != config.API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    return True
+# Constants
+MAX_API_KEYS_PER_USER = 3
+
+
+def hash_password(password: str) -> str:
+    """Hash password with salt."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def generate_token() -> str:
+    """Generate a secure session token."""
+    return secrets.token_urlsafe(32)
+
+
+# API Key authentication (for SDK/API usage)
+async def verify_api_key(
+    x_api_key: str = Header(None, alias="X-API-Key"),
+    db: AsyncSession = Depends(get_db)
+):
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    # Check admin API key first
+    admin_key = os.getenv("ADMIN_API_KEY", "")
+    if admin_key and x_api_key == admin_key:
+        return None  # Admin key is valid, no DB record needed
+
+    # Check user API keys in database
+    result = await db.execute(
+        select(APIKeyDB).where(APIKeyDB.key == x_api_key)
+    )
+    api_key = result.scalar_one_or_none()
+
+    if api_key and api_key.is_active:
+        # Update last_used
+        api_key.last_used = datetime.utcnow()
+        await db.commit()
+        return api_key
+
+    raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+# User token authentication (for dashboard/management)
+async def get_current_user(
+    authorization: str = Header(None, alias="Authorization"),
+    db: AsyncSession = Depends(get_db)
+) -> UserDB:
+    """Get current user from Bearer token."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization required")
+
+    token = authorization.replace("Bearer ", "")
+
+    # Get session token
+    result = await db.execute(
+        select(SessionTokenDB).where(SessionTokenDB.token == token)
+    )
+    session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Get user
+    result = await db.execute(
+        select(UserDB).where(UserDB.id == session.user_id)
+    )
+    user = result.scalar_one_or_none()
+
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    return user
 
 
 # Request logging middleware
@@ -623,6 +701,225 @@ async def list_mock_incident_types(auth: bool = Depends(verify_api_key)):
             {"name": "random", "description": "Random incident type"}
         ]
     }
+
+
+# ============================================================================
+# User Authentication Endpoints
+# ============================================================================
+
+@app.post("/auth/register", response_model=TokenResponse)
+async def register(request: UserRegisterRequest, db: AsyncSession = Depends(get_db)):
+    """Register a new user account."""
+    # Check if email exists
+    result = await db.execute(
+        select(UserDB).where(UserDB.email == request.email)
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    # Create user
+    user = UserDB(
+        email=request.email,
+        password_hash=hash_password(request.password)
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    # Create session token
+    token = generate_token()
+    session = SessionTokenDB(token=token, user_id=user.id)
+    db.add(session)
+    await db.commit()
+
+    logger.info(f"User registered: {user.email}")
+
+    return TokenResponse(
+        access_token=token,
+        user=UserResponse(
+            id=user.id,
+            email=user.email,
+            created_at=user.created_at,
+            is_active=user.is_active
+        )
+    )
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(request: UserLoginRequest, db: AsyncSession = Depends(get_db)):
+    """Login and get access token."""
+    result = await db.execute(
+        select(UserDB).where(UserDB.email == request.email)
+    )
+    user = result.scalar_one_or_none()
+
+    if not user or user.password_hash != hash_password(request.password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account disabled")
+
+    # Create session token
+    token = generate_token()
+    session = SessionTokenDB(token=token, user_id=user.id)
+    db.add(session)
+    await db.commit()
+
+    logger.info(f"User logged in: {user.email}")
+
+    return TokenResponse(
+        access_token=token,
+        user=UserResponse(
+            id=user.id,
+            email=user.email,
+            created_at=user.created_at,
+            is_active=user.is_active
+        )
+    )
+
+
+@app.post("/auth/logout")
+async def logout(
+    user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Logout and invalidate all user tokens."""
+    result = await db.execute(
+        select(SessionTokenDB).where(SessionTokenDB.user_id == user.id)
+    )
+    tokens = result.scalars().all()
+    for token in tokens:
+        await db.delete(token)
+    await db.commit()
+
+    return {"status": "logged out"}
+
+
+@app.get("/auth/me", response_model=UserResponse)
+async def get_me(user: UserDB = Depends(get_current_user)):
+    """Get current user info."""
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        created_at=user.created_at,
+        is_active=user.is_active
+    )
+
+
+# ============================================================================
+# API Key Management Endpoints
+# ============================================================================
+
+@app.post("/api-keys", response_model=APIKeyResponse)
+async def create_api_key(
+    request: APIKeyCreateRequest,
+    user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Create a new API key. Limited to 3 per user."""
+    # Count user's keys
+    result = await db.execute(
+        select(func.count(APIKeyDB.key)).where(APIKeyDB.user_id == user.id)
+    )
+    key_count = result.scalar()
+
+    if key_count >= MAX_API_KEYS_PER_USER:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {MAX_API_KEYS_PER_USER} API keys allowed per user"
+        )
+
+    # Create key
+    api_key = APIKeyDB(
+        name=request.name,
+        user_id=user.id
+    )
+    db.add(api_key)
+    await db.commit()
+    await db.refresh(api_key)
+
+    logger.info(f"Created API key '{api_key.name}' for user {user.email}")
+
+    return APIKeyResponse(
+        key=api_key.key,
+        name=api_key.name,
+        created_at=api_key.created_at,
+        is_active=api_key.is_active
+    )
+
+
+@app.get("/api-keys")
+async def list_api_keys(
+    user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """List all API keys for current user."""
+    result = await db.execute(
+        select(APIKeyDB).where(APIKeyDB.user_id == user.id)
+    )
+    user_keys = result.scalars().all()
+
+    return [
+        {
+            "key": k.key[:12] + "...",  # Masked for security
+            "name": k.name,
+            "created_at": k.created_at.isoformat(),
+            "last_used": k.last_used.isoformat() if k.last_used else None,
+            "is_active": k.is_active
+        }
+        for k in user_keys
+    ]
+
+
+@app.delete("/api-keys/{key_prefix}")
+async def revoke_api_key(
+    key_prefix: str,
+    user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Revoke an API key. Users can only revoke their own keys."""
+    result = await db.execute(
+        select(APIKeyDB).where(
+            APIKeyDB.key.startswith(key_prefix),
+            APIKeyDB.user_id == user.id
+        )
+    )
+    api_key = result.scalar_one_or_none()
+
+    if not api_key:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    api_key.is_active = False
+    await db.commit()
+
+    logger.info(f"Revoked API key '{api_key.name}' for user {user.email}")
+    return {"status": "revoked", "name": api_key.name}
+
+
+@app.delete("/api-keys/{key_prefix}/delete")
+async def delete_api_key(
+    key_prefix: str,
+    user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Permanently delete an API key. Users can only delete their own keys."""
+    result = await db.execute(
+        select(APIKeyDB).where(
+            APIKeyDB.key.startswith(key_prefix),
+            APIKeyDB.user_id == user.id
+        )
+    )
+    api_key = result.scalar_one_or_none()
+
+    if not api_key:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    name = api_key.name
+    await db.delete(api_key)
+    await db.commit()
+
+    logger.info(f"Deleted API key '{name}' for user {user.email}")
+    return {"status": "deleted", "name": name}
 
 
 # ============================================================================

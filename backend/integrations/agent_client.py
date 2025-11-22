@@ -15,13 +15,90 @@ from engines import incident_manager, stability_evaluator
 
 
 class WatsonXAgentClient:
-    """Client for communicating with watsonx Agent API."""
+    """Client for communicating with watsonx Orchestrate Agent API."""
 
     def __init__(self):
         self.api_key = config.WATSONX_API_KEY
-        self.project_id = config.WATSONX_PROJECT_ID
-        self.agent_url = config.WATSONX_AGENT_URL
+        self.agent_url = config.WATSONX_URL
         self.max_retries = config.MAX_AGENT_RETRIES
+        self._access_token = None
+        self._token_expires = None
+
+    async def _get_access_token(self) -> str:
+        """Get IAM access token from API key."""
+        # Check if we have a valid cached token
+        if self._access_token and self._token_expires and datetime.utcnow() < self._token_expires:
+            return self._access_token
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://iam.cloud.ibm.com/identity/token",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    data={
+                        "grant_type": "urn:ibm:params:oauth:grant-type:apikey",
+                        "apikey": self.api_key
+                    }
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    self._access_token = data.get("access_token")
+                    # Token typically valid for 1 hour, refresh at 50 min
+                    from datetime import timedelta
+                    self._token_expires = datetime.utcnow() + timedelta(minutes=50)
+                    return self._access_token
+                else:
+                    logger.error(f"Failed to get IAM token: {response.status_code}")
+                    return ""
+        except Exception as e:
+            logger.error(f"IAM token error: {str(e)}")
+            return ""
+
+    def _build_prompt(
+        self,
+        logs: List[LogEntry],
+        metrics: List[MetricsSnapshot],
+        context: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Build the prompt for the agent."""
+        prompt_parts = ["Analyze the following incident data and provide root cause analysis:\n"]
+
+        # Add logs
+        if logs:
+            prompt_parts.append("\n## Error Logs:")
+            for log in logs[-30:]:  # Last 30 logs
+                prompt_parts.append(f"- {log.timestamp} [{log.level.value.upper()}] {log.message}")
+
+        # Add metrics
+        if metrics:
+            prompt_parts.append("\n\n## System Metrics:")
+            for m in metrics[-10:]:  # Last 10 snapshots
+                parts = []
+                if m.cpu_percent is not None:
+                    parts.append(f"CPU: {m.cpu_percent}%")
+                if m.memory_percent is not None:
+                    parts.append(f"Memory: {m.memory_percent}%")
+                if m.latency_ms is not None:
+                    parts.append(f"Latency: {m.latency_ms}ms")
+                if m.error_rate is not None:
+                    parts.append(f"Error Rate: {m.error_rate*100:.1f}%")
+                if parts:
+                    prompt_parts.append(f"- {m.timestamp}: {', '.join(parts)}")
+
+        # Add context
+        if context:
+            prompt_parts.append(f"\n\n## Additional Context:")
+            for key, value in context.items():
+                prompt_parts.append(f"- {key}: {value}")
+
+        prompt_parts.append("\n\nProvide:")
+        prompt_parts.append("1. Root cause analysis")
+        prompt_parts.append("2. Contributing factors")
+        prompt_parts.append("3. Recommended actions to resolve")
+        prompt_parts.append("4. Assessment of current system stability")
+
+        return "\n".join(prompt_parts)
 
     async def call_agent(
         self,
@@ -30,22 +107,35 @@ class WatsonXAgentClient:
         metrics: List[MetricsSnapshot],
         context: Optional[Dict[str, Any]] = None
     ) -> AgentResponse:
-        """Call the watsonx agent with incident context."""
+        """Call the watsonx Orchestrate agent with incident context."""
 
-        # Build request payload
+        if not self.agent_url:
+            logger.error("WATSONX_URL not configured")
+            return AgentResponse(
+                incident_id=incident_id,
+                summary="watsonx agent not configured",
+                system_ok=False
+            )
+
+        # Get access token
+        access_token = await self._get_access_token()
+        if not access_token:
+            return AgentResponse(
+                incident_id=incident_id,
+                summary="Failed to authenticate with watsonx",
+                system_ok=False
+            )
+
+        # Build the prompt
+        prompt = self._build_prompt(logs, metrics, context)
+
+        # Build request payload (OpenAI-compatible chat completions format)
         request_data = {
-            "incident_id": incident_id,
-            "logs": [log.model_dump() for log in logs[-50:]],  # Last 50 logs
-            "metrics": [m.model_dump() for m in metrics[-20:]],  # Last 20 snapshots
-            "context": context or {},
-            "timestamp": datetime.utcnow().isoformat()
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "stream": False
         }
-
-        # For datetime serialization
-        def serialize_datetime(obj):
-            if isinstance(obj, datetime):
-                return obj.isoformat()
-            raise TypeError(f"Type {type(obj)} not serializable")
 
         logger.log_agent_request(incident_id, {
             "log_count": len(logs),
@@ -58,9 +148,9 @@ class WatsonXAgentClient:
                     self.agent_url,
                     json=request_data,
                     headers={
-                        "Authorization": f"Bearer {self.api_key}",
+                        "Authorization": f"Bearer {access_token}",
                         "Content-Type": "application/json",
-                        "X-Project-ID": self.project_id
+                        "Accept": "application/json"
                     }
                 )
 
@@ -94,55 +184,89 @@ class WatsonXAgentClient:
             )
 
     def _parse_agent_response(self, incident_id: str, result: Dict[str, Any]) -> AgentResponse:
-        """Parse the agent's response into structured format."""
+        """Parse the watsonx Orchestrate chat completions response."""
         try:
-            # Extract RCA
-            rca = None
-            if "rca" in result or "root_cause" in result:
-                rca_data = result.get("rca", {})
-                rca = RCAResult(
-                    root_cause=rca_data.get("root_cause", result.get("root_cause", "")),
-                    contributing_factors=rca_data.get("contributing_factors", []),
-                    evidence=rca_data.get("evidence", []),
-                    confidence=rca_data.get("confidence", 0.5)
-                )
+            # Extract the message content from chat completions format
+            content = ""
+            if "choices" in result:
+                for choice in result.get("choices", []):
+                    msg = choice.get("message", {})
+                    content = msg.get("content", "")
+                    if content:
+                        break
 
-            # Extract recommended actions
+            # If no choices, check for direct content
+            if not content:
+                content = result.get("content", result.get("response", str(result)))
+
+            # Parse the text response to extract structured data
+            content_lower = content.lower()
+
+            # Extract root cause from response text
+            root_cause = content
+            contributing_factors = []
+            evidence = []
+
+            # Try to identify key sections in the response
+            if "root cause" in content_lower:
+                # Extract text after "root cause"
+                idx = content_lower.find("root cause")
+                root_cause = content[idx:idx+500].split("\n")[0:3]
+                root_cause = " ".join(root_cause).strip()
+
+            # Look for contributing factors
+            if "contributing" in content_lower or "factors" in content_lower:
+                contributing_factors = ["See full analysis in response"]
+
+            # Look for recommended actions
             actions = []
-            for action_data in result.get("recommended_actions", result.get("actions", [])):
-                if isinstance(action_data, str):
+            action_keywords = ["restart", "scale", "increase", "decrease", "clear", "flush", "rollback", "check", "monitor"]
+            for keyword in action_keywords:
+                if keyword in content_lower:
                     actions.append(RecoveryAction(
                         action_type="suggested",
-                        description=action_data,
+                        description=f"Consider: {keyword} related action (see full response)",
                         automated=False
                     ))
-                elif isinstance(action_data, dict):
-                    actions.append(RecoveryAction(
-                        action_type=action_data.get("type", action_data.get("action_type", "suggested")),
-                        description=action_data.get("description", str(action_data)),
-                        parameters=action_data.get("parameters", {}),
-                        automated=action_data.get("automated", False)
-                    ))
 
-            # Extract system status
-            system_ok = result.get("system_ok", result.get("is_stable", False))
-            if isinstance(system_ok, str):
-                system_ok = system_ok.lower() in ["true", "yes", "ok", "stable"]
+            # Determine system status from response
+            system_ok = False
+            ok_indicators = ["stable", "resolved", "fixed", "normal", "healthy", "recovered"]
+            not_ok_indicators = ["critical", "failure", "down", "exhausted", "timeout", "error"]
+
+            for indicator in ok_indicators:
+                if indicator in content_lower:
+                    system_ok = True
+                    break
+
+            for indicator in not_ok_indicators:
+                if indicator in content_lower:
+                    system_ok = False
+                    break
+
+            # Build RCA result
+            rca = RCAResult(
+                root_cause=root_cause[:500] if len(root_cause) > 500 else root_cause,
+                contributing_factors=contributing_factors,
+                evidence=evidence,
+                confidence=0.7
+            )
 
             response = AgentResponse(
                 incident_id=incident_id,
                 rca=rca,
-                recommended_actions=actions,
-                summary=result.get("summary", result.get("message", "")),
+                recommended_actions=actions[:5],  # Limit to 5 actions
+                summary=content[:1000] if len(content) > 1000 else content,
                 system_ok=system_ok,
-                confidence=result.get("confidence", 0.5),
-                raw_response=str(result)
+                confidence=0.7,
+                raw_response=content
             )
 
             logger.log_agent_response(incident_id, {
-                "has_rca": rca is not None,
+                "has_rca": True,
                 "action_count": len(actions),
-                "system_ok": system_ok
+                "system_ok": system_ok,
+                "response_length": len(content)
             }, success=True)
 
             return response

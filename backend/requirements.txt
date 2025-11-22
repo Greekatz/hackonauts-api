@@ -1,10 +1,24 @@
+# Web Framework
 fastapi==0.104.1
 uvicorn==0.24.0
 pydantic==2.5.2
-python-dotenv==1.0.0
-httpx==0.25.2
-redis==5.0.1
-aiohttp==3.9.1
-numpy==1.26.2
-slack-sdk==3.23.0
 python-multipart==0.0.6
+
+# Database (PostgreSQL)
+sqlalchemy==2.0.23
+asyncpg==0.29.0
+greenlet==3.0.2
+
+# HTTP Clients
+httpx==0.25.2
+aiohttp==3.9.1
+
+# Environment & Config
+python-dotenv==1.0.0
+
+# Notifications
+slack-sdk==3.23.0
+redis==5.0.1
+
+# Analytics
+numpy==1.26.2
