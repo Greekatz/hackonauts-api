@@ -289,7 +289,13 @@ class SlackApp:
             return True  # Skip verification if not configured
 
         # Check timestamp to prevent replay attacks
-        if abs(time.time() - int(timestamp)) > TIMESTAMP_MAX_AGE_SECONDS:
+        try:
+            time_diff = abs(time.time() - int(timestamp))
+            if time_diff > TIMESTAMP_MAX_AGE_SECONDS:
+                logger.warning(f"Slack timestamp too old: {time_diff}s (max {TIMESTAMP_MAX_AGE_SECONDS}s)")
+                return False
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Invalid timestamp: {timestamp} - {e}")
             return False
 
         # Compute expected signature
@@ -300,7 +306,10 @@ class SlackApp:
             hashlib.sha256
         ).hexdigest()
 
-        return hmac.compare_digest(expected, signature)
+        match = hmac.compare_digest(expected, signature)
+        if not match:
+            logger.warning(f"Signature mismatch - expected: {expected[:30]}... got: {signature[:30]}...")
+        return match
 
     async def list_channels(self, bot_token: str) -> List[Dict[str, Any]]:
         """List all public channels in the workspace."""
@@ -319,15 +328,31 @@ class SlackApp:
             json_data={"channel": channel_id}
         )
 
+    async def create_channel(self, bot_token: str, name: str) -> Optional[str]:
+        """Create a new public channel and return its ID."""
+        data = await self.http.post(
+            "conversations.create",
+            bot_token=bot_token,
+            json_data={"name": name, "is_private": False}
+        )
+        if data.get("ok"):
+            channel_id = data.get("channel", {}).get("id")
+            logger.info(f"Created channel: #{name}")
+            return channel_id
+        else:
+            logger.warning(f"Failed to create channel {name}: {data.get('error')}")
+            return None
+
     async def auto_join_incidents_channel(self, bot_token: str) -> Optional[str]:
         """
         Find and join a channel named 'incidents' (or similar).
+        Creates the channel if it doesn't exist.
 
         Args:
             bot_token: The workspace's bot token
 
         Returns:
-            The channel ID if joined, None otherwise
+            The channel ID if joined/created, None otherwise
         """
         channels = await self.list_channels(bot_token)
 
@@ -342,7 +367,10 @@ class SlackApp:
                     logger.info(f"Auto-joined channel: #{channel.get('name')}")
                     return channel_id
 
-        return None
+        # No matching channel found - create one
+        logger.info("No incidents channel found, creating #sra-incidents")
+        channel_id = await self.create_channel(bot_token, "sra-incidents")
+        return channel_id
 
     async def uninstall_app(self, bot_token: str) -> Dict[str, Any]:
         """
@@ -769,6 +797,12 @@ class SlackApp:
                 "danger"  # Red button to indicate caution
             ))
         buttons.append(SlackBlockBuilder.button(
+            ":rotating_light: Escalate",
+            "escalate_incident",
+            incident_id,
+            "danger"
+        ))
+        buttons.append(SlackBlockBuilder.button(
             ":white_check_mark: Mark Resolved",
             "resolve_incident",
             incident_id,
@@ -791,6 +825,84 @@ class SlackApp:
             bot_token=bot_token,
             channel=channel,
             text=f"RCA Complete for incident {incident_id[:8]}",
+            blocks=blocks
+        )
+
+    async def send_escalation(
+        self,
+        bot_token: str,
+        channel: str,
+        incident_id: str,
+        incident_title: str,
+        severity: str,
+        escalated_by: str,
+        summary: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Send an escalation alert to the Slack channel with @channel mention.
+
+        Args:
+            bot_token: The workspace's bot token
+            channel: Channel to send to
+            incident_id: The incident ID
+            incident_title: Title of the incident
+            severity: Severity level
+            escalated_by: User who triggered escalation
+            summary: Optional summary of the issue
+
+        Returns:
+            Slack API response
+        """
+        severity_emoji = get_severity_emoji(severity)
+
+        blocks = [
+            SlackBlockBuilder.header(":rotating_light: INCIDENT ESCALATED - HELP NEEDED :rotating_light:"),
+            SlackBlockBuilder.section(
+                f"<!channel> *An incident requires immediate attention!*"
+            ),
+            SlackBlockBuilder.divider(),
+            SlackBlockBuilder.section_fields([
+                {"label": "Incident", "value": f"`{incident_id[:8]}`"},
+                {"label": "Severity", "value": f"{severity_emoji} {severity.upper()}"},
+            ]),
+            SlackBlockBuilder.section(f"*Title:* {incident_title}"),
+        ]
+
+        if summary:
+            blocks.append(SlackBlockBuilder.section(f"*Summary:*\n{summary[:MAX_DESCRIPTION_LENGTH]}"))
+
+        blocks.append(SlackBlockBuilder.divider())
+        blocks.append(SlackBlockBuilder.section(
+            f":bust_in_silhouette: *Escalated by:* <@{escalated_by}>"
+        ))
+        blocks.append(SlackBlockBuilder.section(
+            ":point_right: *Please respond in thread if you can assist.*"
+        ))
+
+        # Add buttons for responders
+        buttons = [
+            SlackBlockBuilder.button(
+                ":raised_hand: I'm Looking Into It",
+                "acknowledge_escalation",
+                incident_id,
+                "primary"
+            ),
+            SlackBlockBuilder.button(
+                ":eyes: View Incident",
+                "view_incident",
+                incident_id
+            ),
+        ]
+        blocks.append(SlackBlockBuilder.actions(buttons))
+
+        blocks.append(SlackBlockBuilder.context(
+            f":clock1: Escalated at <!date^{int(time.time())}^{{date_short_pretty}} {{time}}|now>"
+        ))
+
+        return await self.send_message(
+            bot_token=bot_token,
+            channel=channel,
+            text=f"ESCALATION: {incident_title} - @channel help needed!",
             blocks=blocks
         )
 

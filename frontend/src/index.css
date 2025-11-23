@@ -1,0 +1,174 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 215 25% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 215 25% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 215 25% 15%;
+
+    --primary: 215 85% 50%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 15% 92%;
+    --secondary-foreground: 215 25% 15%;
+
+    --muted: 210 15% 95%;
+    --muted-foreground: 215 15% 45%;
+
+    --accent: 190 85% 50%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 75% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 215 15% 88%;
+    --input: 215 15% 88%;
+    --ring: 215 85% 50%;
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 215 30% 12%;
+    --sidebar-foreground: 210 15% 90%;
+    --sidebar-primary: 215 85% 50%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 215 25% 18%;
+    --sidebar-accent-foreground: 210 15% 90%;
+    --sidebar-border: 215 25% 20%;
+    --sidebar-ring: 215 85% 50%;
+
+    /* Severity colors */
+    --severity-critical: 0 75% 55%;
+    --severity-high: 25 90% 55%;
+    --severity-medium: 45 95% 60%;
+    --severity-low: 145 65% 50%;
+
+    /* Status colors */
+    --status-open: 0 75% 55%;
+    --status-acknowledged: 25 90% 55%;
+    --status-resolved: 145 65% 50%;
+
+    /* Chart colors */
+    --chart-1: 215 85% 50%;
+    --chart-2: 190 85% 50%;
+    --chart-3: 270 75% 60%;
+    --chart-4: 25 90% 55%;
+    --chart-5: 145 65% 50%;
+
+    /* Transitions */
+    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .dark {
+    --background: 215 30% 8%;
+    --foreground: 210 15% 92%;
+
+    --card: 215 28% 12%;
+    --card-foreground: 210 15% 92%;
+
+    --popover: 215 28% 12%;
+    --popover-foreground: 210 15% 92%;
+
+    --primary: 215 85% 55%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 215 25% 18%;
+    --secondary-foreground: 210 15% 92%;
+
+    --muted: 215 25% 18%;
+    --muted-foreground: 215 15% 60%;
+
+    --accent: 190 85% 50%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 75% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 215 25% 20%;
+    --input: 215 25% 20%;
+    --ring: 215 85% 55%;
+
+    --sidebar-background: 215 35% 10%;
+    --sidebar-foreground: 210 15% 90%;
+    --sidebar-primary: 215 85% 55%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 215 30% 16%;
+    --sidebar-accent-foreground: 210 15% 90%;
+    --sidebar-border: 215 30% 18%;
+    --sidebar-ring: 215 85% 55%;
+
+    /* Severity colors (same in dark mode) */
+    --severity-critical: 0 75% 55%;
+    --severity-high: 25 90% 55%;
+    --severity-medium: 45 95% 60%;
+    --severity-low: 145 65% 50%;
+
+    /* Status colors */
+    --status-open: 0 75% 55%;
+    --status-acknowledged: 25 90% 55%;
+    --status-resolved: 145 65% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-semibold;
+  }
+}
+
+@layer utilities {
+  .transition-smooth {
+    transition: var(--transition-smooth);
+  }
+
+  .severity-critical {
+    @apply text-[hsl(var(--severity-critical))];
+  }
+
+  .severity-high {
+    @apply text-[hsl(var(--severity-high))];
+  }
+
+  .severity-medium {
+    @apply text-[hsl(var(--severity-medium))];
+  }
+
+  .severity-low {
+    @apply text-[hsl(var(--severity-low))];
+  }
+
+  .bg-severity-critical {
+    @apply bg-[hsl(var(--severity-critical))];
+  }
+
+  .bg-severity-high {
+    @apply bg-[hsl(var(--severity-high))];
+  }
+
+  .bg-severity-medium {
+    @apply bg-[hsl(var(--severity-medium))];
+  }
+
+  .bg-severity-low {
+    @apply bg-[hsl(var(--severity-low))];
+  }
+}

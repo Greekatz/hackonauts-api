@@ -106,6 +106,12 @@ class Incident(BaseModel):
     title: str = ""
     description: str = ""
 
+    # Frontend compatibility fields
+    service: Optional[str] = None
+    assignee: str = "SRE Team"
+    affected_users: int = 0
+    impact: Optional[str] = None
+
     # Context
     logs: List[LogEntry] = Field(default_factory=list)
     metrics: List[MetricsSnapshot] = Field(default_factory=list)

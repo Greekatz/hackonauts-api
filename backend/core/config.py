@@ -24,6 +24,7 @@ class Config:
     # ==========================================================================
     APP_NAME: str = os.getenv("APP_NAME", "SRA Incident Response")
     DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
     # ==========================================================================
     # Security Settings
@@ -61,7 +62,7 @@ class Config:
     # ==========================================================================
     SLACK_WEBHOOK_URL: str = os.getenv("SLACK_WEBHOOK_URL", "")
     SLACK_BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")
-    SLACK_CHANNEL: str = os.getenv("SLACK_CHANNEL", "#incidents")
+    SLACK_CHANNEL: str = os.getenv("SLACK_CHANNEL", "incidents")
 
     # Slack OAuth (for multi-workspace installations)
     SLACK_CLIENT_ID: str = os.getenv("SLACK_CLIENT_ID", "")

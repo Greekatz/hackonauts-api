@@ -234,7 +234,7 @@ class IncidentManager:
         self,
         status: Optional[IncidentStatus] = None,
         limit: int = 50
-    ) -> List[Dict[str, Any]]:
+    ) -> List[Incident]:
         """List incidents with optional filtering."""
         incidents = list(self.incidents.values())
 
@@ -244,7 +244,7 @@ class IncidentManager:
         # Sort by created_at descending
         incidents.sort(key=lambda x: x.created_at, reverse=True)
 
-        return [self.get_incident_summary(i.id) for i in incidents[:limit]]
+        return incidents[:limit]
 
     def get_history(self, incident_id: str) -> List[Dict[str, Any]]:
         """Get full history of an incident for final summary."""
