@@ -96,7 +96,7 @@ class SlackWorkspaceDB(Base):
     bot_token = Column(String, nullable=False)  # xoxb-... token
     bot_user_id = Column(String, nullable=True)
     user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)  # User who installed
-    default_channel = Column(String, default="#incidents")
+    default_channel = Column(String, default="incidents")
     installed_at = Column(DateTime, default=lambda: datetime.utcnow())
     is_active = Column(Boolean, default=True)
 

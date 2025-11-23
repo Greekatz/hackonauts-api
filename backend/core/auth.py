@@ -48,8 +48,8 @@ def generate_token() -> str:
 
 
 def get_token_expiry() -> datetime:
-    """Get the expiry datetime for a new session token."""
-    return datetime.now(timezone.utc) + timedelta(hours=config.SESSION_TOKEN_EXPIRE_HOURS)
+    """Get the expiry datetime for a new session token (naive UTC)."""
+    return datetime.utcnow() + timedelta(hours=config.SESSION_TOKEN_EXPIRE_HOURS)
 
 
 def is_token_expired(expires_at: Optional[datetime]) -> bool:
@@ -57,7 +57,7 @@ def is_token_expired(expires_at: Optional[datetime]) -> bool:
     Check if a token has expired.
 
     Args:
-        expires_at: Token expiry datetime (can be naive or aware)
+        expires_at: Token expiry datetime (naive UTC)
 
     Returns:
         True if token is expired or expires_at is None
@@ -65,15 +65,16 @@ def is_token_expired(expires_at: Optional[datetime]) -> bool:
     if expires_at is None:
         return False  # No expiry set means token doesn't expire
 
-    # Handle both naive and aware datetimes
-    now = datetime.now(timezone.utc)
-    if expires_at.tzinfo is None:
-        # Naive datetime - assume UTC
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    # Use naive UTC datetime for comparison
+    now = datetime.utcnow()
+
+    # If expires_at has timezone info, make it naive
+    if expires_at.tzinfo is not None:
+        expires_at = expires_at.replace(tzinfo=None)
 
     return now > expires_at
 
 
 def utc_now() -> datetime:
-    """Get current UTC datetime (timezone-aware)."""
-    return datetime.now(timezone.utc)
+    """Get current UTC datetime (naive, for database compatibility)."""
+    return datetime.utcnow()
