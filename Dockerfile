@@ -11,30 +11,19 @@ RUN npm install
 COPY frontend/ ./
 RUN npm run build
 
-# Verify build exists (Vite creates 'dist', not 'build')
+# Verify build exists (Vite creates 'dist')
 RUN ls -la /app/dist
 
-# ---------------------------
-# Step 2: Build FastAPI backend
-# ---------------------------
-FROM python:3.11-slim
+# ---------- Stage 2: Serve with Nginx ----------
+FROM nginx:alpine
 
-WORKDIR /app
+# Copy the build output to replace the default nginx contents.
+# Source: /app/dist (from Stage 1)
+# Dest: /usr/share/nginx/html (standard Nginx static file location)
+COPY --from=frontend /app/dist /usr/share/nginx/html
 
-# Install backend dependencies
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Expose port 80
+EXPOSE 80
 
-# Copy backend source code
-COPY backend/ ./
-
-# Copy React build from frontend stage
-# Source: /app/dist (where Vite put it in Stage 1)
-# Dest: ./frontend/build (where your FastAPI likely expects it)
-COPY --from=frontend /app/dist ./frontend/build
-
-# Expose port
-EXPOSE 8000
-
-# Run FastAPI
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start Nginx
+CMD ["nginx", "-g", "daemon off;"]
