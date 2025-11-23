@@ -1,22 +1,17 @@
-# ---------------------------
-# Step 1: Build React frontend
-# ---------------------------
+# ---------- Stage 1: Build React ----------
 FROM node:20-alpine AS frontend
 
-WORKDIR /app/frontend
+WORKDIR /app
 
-# Copy package files and install dependencies
 COPY frontend/package*.json ./
-RUN npm install --silent
-
-# Copy all frontend source code
+RUN npm install
 COPY frontend/ ./
 
 # Build React app
 RUN npm run build
 
-# Verify build folder exists
-RUN ls -la /app/frontend/build
+# Verify build exists
+RUN ls -la /app/build
 
 # ---------------------------
 # Step 2: Build FastAPI backend
