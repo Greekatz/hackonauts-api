@@ -187,32 +187,72 @@ curl -X DELETE -H "Authorization: Bearer your-token" \
 
 ---
 
-## What SRA Detects
+## How SRA Works
 
-| Anomaly Type | Detection Method |
+### LLM-Powered Monitoring
+
+SRA uses IBM watsonx to continuously monitor your system every 5 minutes. The LLM analyzes:
+- Recent logs (INFO, WARNING, ERROR, CRITICAL)
+- System metrics (CPU, memory, latency, error rates)
+
+The LLM is configured to be **conservative** - it only flags clear, significant problems like:
+- ERROR or CRITICAL log messages indicating actual failures
+- Severe resource exhaustion (very high CPU/memory)
+- Service outages, crashes, or connection failures
+- Sustained high error rates
+
+Normal operational variation and INFO/DEBUG logs are ignored.
+
+### Detection Examples
+
+| Anomaly Type | What Triggers It |
 |--------------|------------------|
-| High Error Rate | Error logs exceed 5% of total |
-| CPU Overload | CPU usage > 85% |
-| Memory Pressure | Memory usage > 90% |
-| Latency Spikes | Response time > 2000ms |
-| Database Issues | Connection timeout/refused patterns |
-| Disk Full | Disk space warnings |
-| Network Errors | Connection reset patterns |
+| Database Failure | Connection refused, timeout, pool exhausted |
+| Memory Leak | OOM errors, heap space exhausted |
+| CPU Overload | Health check failures, thread pool exhausted |
+| Disk Full | No space left on device errors |
+| External API Down | Circuit breaker open, upstream timeouts |
+| Auth Failures | Spike in 401 errors, JWT validation failures |
 
 ---
 
 ## Auto-Healing Actions
 
-When incidents are detected, SRA can automatically execute remediation:
+When incidents are detected, SRA sends alerts to Slack with recommended fix actions. Users can choose to execute auto-healing with a single button click.
+
+### Slack-Based Workflow
+
+```
+LLM Detects Issue → Creates Incident → Sends to Slack
+                                            ↓
+                    ┌─────────────────────────────────────────┐
+                    │  Slack Alert with:                      │
+                    │  - Issue summary & root cause           │
+                    │  - Recommended actions                  │
+                    │  - "Execute Auto-Fix" button            │
+                    └─────────────────────────────────────────┘
+                                            ↓
+                    User clicks button → Actions executed
+                    (respects AUTOHEAL_DRY_RUN setting)
+```
+
+### Available Actions
 
 | Action | Description |
 |--------|-------------|
-| Restart Service | Restart via Docker, Kubernetes, or systemd |
-| Scale Replicas | Increase service instances |
-| Flush Cache | Clear Redis/Memcached |
-| Clear Queue | Drain message queues |
-| Reroute Traffic | Redirect to healthy endpoints |
-| Rollback | Revert to previous deployment |
+| restart_service | Restart via Docker, Kubernetes, or systemd |
+| scale_replicas | Increase service instances |
+| flush_cache | Clear Redis/Memcached |
+| clear_queue | Drain message queues |
+| reroute_traffic | Redirect to healthy endpoints |
+| rollback_deployment | Revert to previous deployment |
+| clear_disk | Free up disk space |
+
+### Safety Controls
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `AUTOHEAL_DRY_RUN` | `true` | Log actions without executing (safe mode) |
 
 ---
 
@@ -281,9 +321,30 @@ When incidents are detected, SRA can automatically execute remediation:
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | GET | `/health` | None | Health check |
+| GET | `/version` | None | API version info |
 | GET | `/status` | API Key | System status |
 | GET | `/anomaly/status` | API Key | Anomaly detection status |
 | GET | `/stability/check` | API Key | Stability check |
+
+### Slack Integration
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/slack/install` | Bearer | Get Slack OAuth install URL |
+| GET | `/slack/oauth/callback` | None | OAuth callback handler |
+| POST | `/slack/events` | Slack Signature | Slack events webhook |
+| POST | `/slack/commands` | Slack Signature | Slash commands handler |
+| GET | `/slack/workspaces` | Bearer | List connected workspaces |
+| DELETE | `/slack/workspaces/{team_id}` | None | Disconnect workspace |
+| POST | `/slack/workspaces/{team_id}/test` | Bearer | Test connection |
+
+### Auto-Healing
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/autoheal/{action}` | API Key | Execute healing action |
+| GET | `/autoheal/actions` | API Key | List available actions |
+| POST | `/autoheal/dry-run` | API Key | Enable/disable dry run |
 
 ---
 
@@ -337,9 +398,59 @@ SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USER=your-email
 SMTP_PASSWORD=your-password
+
+# Slack App (for multi-workspace bot)
+SLACK_CLIENT_ID=your-slack-client-id
+SLACK_CLIENT_SECRET=your-slack-client-secret
+SLACK_SIGNING_SECRET=your-slack-signing-secret
+SLACK_REDIRECT_URI=https://your-domain.com/slack/oauth/callback
+
+# Auto-Healing (optional)
+AUTOHEAL_DRY_RUN=true         # Set to false to actually run commands
 ```
 
 The server runs at `http://localhost:8000`. API docs at `http://localhost:8000/docs`.
+
+---
+
+## Slack Bot Setup
+
+SRA includes a Slack bot for real-time incident alerts and slash commands.
+
+### 1. Create a Slack App
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app
+2. Under **OAuth & Permissions**, add these bot token scopes:
+   - `channels:join`, `channels:read`, `chat:write`
+   - `commands`, `groups:read`, `im:read`, `im:write`
+   - `users:read`
+
+### 2. Configure Slash Commands
+
+Add these commands under **Slash Commands**:
+- `/sra-status` - Check system status
+- `/sra-check` - Review recent logs for errors
+- `/sra-incidents` - List recent incidents
+- `/sra-rca` - Trigger root cause analysis
+
+### 3. Enable Events
+
+Under **Event Subscriptions**:
+- Request URL: `https://your-domain.com/slack/events`
+- Subscribe to: `app_mention`, `member_joined_channel`, `message.im`
+
+### 4. Install to Workspace
+
+Users can connect their Slack workspace via:
+```bash
+curl -H "Authorization: Bearer your-token" \
+  https://your-sra-backend.com/slack/install
+```
+
+The bot will:
+- Auto-join `#incidents` channel if it exists
+- Send welcome messages when added to channels
+- Broadcast alerts with `@channel` when incidents occur
 
 ---
 

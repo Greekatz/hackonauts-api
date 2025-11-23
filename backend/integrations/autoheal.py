@@ -28,8 +28,10 @@ class AutoHealExecutor:
 
     def __init__(self):
         self.enabled = True
-        self.dry_run = False  # Set to True to simulate without executing
+        # Default to dry-run mode from config (safe by default)
+        self.dry_run = getattr(config, 'AUTOHEAL_DRY_RUN', True)
         self.action_history: List[Dict[str, Any]] = []
+        logger.info(f"AutoHealExecutor initialized (dry_run={self.dry_run})")
 
     def set_dry_run(self, enabled: bool):
         """Enable/disable dry run mode."""

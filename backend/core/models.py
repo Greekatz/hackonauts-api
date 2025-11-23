@@ -79,8 +79,9 @@ class RCAResult(BaseModel):
 class RecoveryAction(BaseModel):
     action_type: str
     description: str
+    service: Optional[str] = None  # Target service for the action
     parameters: Dict[str, Any] = Field(default_factory=dict)
-    automated: bool = False
+    automated: bool = False  # True if this can be auto-executed
     executed: bool = False
     result: Optional[str] = None
     executed_at: Optional[datetime] = None
@@ -227,3 +228,104 @@ class APIKeyResponse(BaseModel):
     name: str
     created_at: datetime
     is_active: bool
+
+
+# ============================================================================
+# API Response Models (for type safety and documentation)
+# ============================================================================
+
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: str
+
+
+class BufferStats(BaseModel):
+    logs: int
+    metrics: int
+    snapshots: int
+
+
+class SystemStatusResponse(BaseModel):
+    status: str
+    timestamp: str
+    active_incident: Optional[str] = None
+    stability_trend: str
+    buffer_stats: BufferStats
+
+
+class IngestionResponse(BaseModel):
+    status: str
+    count: int
+    timestamp: str
+
+
+class IncidentResponse(BaseModel):
+    id: str
+    title: str
+    status: str
+    severity: str
+    created_at: str
+    updated_at: str
+    duration_minutes: float
+    root_cause: Optional[str] = None
+    actions_taken: int
+    agent_runs: int
+    stability_trend: str
+    resolution_summary: Optional[str] = None
+
+
+class SlackWorkspaceResponse(BaseModel):
+    team_id: str
+    team_name: Optional[str] = None
+    default_channel: str
+    installed_at: Optional[str] = None
+    is_active: bool
+
+
+class IntegrationStatus(BaseModel):
+    connected: bool
+
+
+class SlackIntegrationStatus(IntegrationStatus):
+    workspaces: List[SlackWorkspaceResponse] = []
+
+
+class AccountIntegrations(BaseModel):
+    slack: SlackIntegrationStatus
+    discord: IntegrationStatus
+    jira: IntegrationStatus
+    pagerduty: IntegrationStatus
+
+
+class APIKeyInfo(BaseModel):
+    name: str
+    key_preview: str
+    created_at: Optional[str] = None
+    last_used: Optional[str] = None
+    is_active: bool
+
+
+class APIKeysOverview(BaseModel):
+    count: int
+    max_allowed: int
+    keys: List[APIKeyInfo]
+
+
+class SubscriptionInfo(BaseModel):
+    tier: str
+    status: str
+    expires: Optional[str] = None
+
+
+class UserOverview(BaseModel):
+    id: str
+    email: str
+    created_at: Optional[str] = None
+    is_active: bool
+    subscription: SubscriptionInfo
+
+
+class AccountOverviewResponse(BaseModel):
+    user: UserOverview
+    integrations: AccountIntegrations
+    api_keys: APIKeysOverview

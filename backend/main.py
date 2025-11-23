@@ -2,18 +2,24 @@
 API Gateway / Main Application
 Production-grade FastAPI backend with all endpoints.
 """
-import os
+from __future__ import annotations
+
+import asyncio
 import time
+import json
 from typing import List, Optional, Dict, Any
-from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
-import hashlib
-import secrets
+
+# API Version
+API_VERSION = "v1"
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,37 +31,103 @@ from core import (
     ForceRCARequest, AnomalyDetection, StabilityReport, RecoveryAction,
     APIKey, APIKeyCreateRequest, APIKeyResponse,
     User, UserRegisterRequest, UserLoginRequest, UserResponse, TokenResponse,
+    HealthResponse, SystemStatusResponse, BufferStats, IngestionResponse,
+    IncidentResponse, SlackWorkspaceResponse, AccountOverviewResponse,
+    UserOverview, SubscriptionInfo, AccountIntegrations, SlackIntegrationStatus,
+    IntegrationStatus, APIKeysOverview, APIKeyInfo,
     config, logger,
-    UserDB, APIKeyDB, SessionTokenDB, init_db, get_db
+    UserDB, APIKeyDB, SessionTokenDB, SlackWorkspaceDB, init_db, get_db, async_session,
+    hash_password, verify_password, generate_token, get_token_expiry, is_token_expired, utc_now
 )
 from engines import (
     ingestion_buffer, LogParser, MetricsNormalizer,
     anomaly_detector, stability_evaluator, incident_manager
 )
 from integrations import (
-    agent_orchestrator, autoheal_executor, HealingAction, notification_manager
+    agent_client, agent_orchestrator, autoheal_executor, HealingAction, notification_manager,
+    slack_app, slack_command_handler, slack_event_handler
 )
 from utils import mock_generator
+
+
+# Rate limiter
+limiter = Limiter(key_func=get_remote_address)
+
+
+# =============================================================================
+# Database Helpers
+# =============================================================================
+
+async def get_active_workspace(
+    team_id: str,
+    db: AsyncSession,
+    user_id: Optional[str] = None
+) -> Optional[SlackWorkspaceDB]:
+    """
+    Get an active Slack workspace by team_id.
+
+    Args:
+        team_id: The Slack team/workspace ID
+        db: Database session
+        user_id: Optional user ID to filter by owner
+
+    Returns:
+        SlackWorkspaceDB if found and active, None otherwise
+    """
+    query = select(SlackWorkspaceDB).where(
+        SlackWorkspaceDB.team_id == team_id,
+        SlackWorkspaceDB.is_active == True
+    )
+    if user_id:
+        query = query.where(SlackWorkspaceDB.user_id == user_id)
+
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
+
+
+# Background monitoring task handle
+_monitoring_task = None
 
 
 # Lifespan context manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _monitoring_task
     logger.info("Starting Incident Response Backend")
     logger.info("Initializing database...")
     await init_db()
     logger.info("Database initialized")
+
+    # Start the continuous monitoring loop
+    _monitoring_task = asyncio.create_task(continuous_monitoring_loop())
+    logger.info("Started continuous monitoring loop (interval: 5 minutes)")
+
     yield
+
+    # Shutdown
     logger.info("Shutting down Incident Response Backend")
+    if _monitoring_task:
+        _monitoring_task.cancel()
+        try:
+            await _monitoring_task
+        except asyncio.CancelledError:
+            pass
+    logger.info("Monitoring loop stopped")
 
 
 # Create FastAPI app
 app = FastAPI(
     title="Incident Response Backend",
     description="Production-grade backend for autonomous incident response with watsonx integration",
-    version="1.0.0",
-    lifespan=lifespan
+    version=f"1.0.0-{API_VERSION}",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
+
+# Add rate limit error handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS middleware
 app.add_middleware(
@@ -67,19 +139,6 @@ app.add_middleware(
 )
 
 
-# Constants
-MAX_API_KEYS_PER_USER = 3
-
-
-def hash_password(password: str) -> str:
-    """Hash password with salt."""
-    return hashlib.sha256(password.encode()).hexdigest()
-
-
-def generate_token() -> str:
-    """Generate a secure session token."""
-    return secrets.token_urlsafe(32)
-
 
 # API Key authentication (for SDK/API usage)
 async def verify_api_key(
@@ -89,9 +148,8 @@ async def verify_api_key(
     if not x_api_key:
         raise HTTPException(status_code=401, detail="API key required")
 
-    # Check admin API key first
-    admin_key = os.getenv("ADMIN_API_KEY", "")
-    if admin_key and x_api_key == admin_key:
+    # Check admin API key first (from centralized config)
+    if config.ADMIN_API_KEY and x_api_key == config.ADMIN_API_KEY:
         return None  # Admin key is valid, no DB record needed
 
     # Check user API keys in database
@@ -102,7 +160,7 @@ async def verify_api_key(
 
     if api_key and api_key.is_active:
         # Update last_used
-        api_key.last_used = datetime.utcnow()
+        api_key.last_used = utc_now()
         await db.commit()
         return api_key
 
@@ -128,6 +186,13 @@ async def get_current_user(
 
     if not session:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Check token expiration (#5 fix)
+    if is_token_expired(session.expires_at):
+        # Clean up expired token
+        await db.delete(session)
+        await db.commit()
+        raise HTTPException(status_code=401, detail="Token expired")
 
     # Get user
     result = await db.execute(
@@ -162,61 +227,69 @@ async def log_requests(request: Request, call_next):
 # Health & Status Endpoints
 # ============================================================================
 
-@app.get("/health")
-async def health_check():
+@app.get("/health", response_model=HealthResponse)
+async def health_check() -> HealthResponse:
     """Basic health check endpoint."""
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+    return HealthResponse(status="healthy", timestamp=utc_now().isoformat())
 
 
-@app.get("/status")
-async def system_status(auth: bool = Depends(verify_api_key)):
+@app.get("/version")
+async def get_version():
+    """Get API version information."""
+    return {
+        "version": "1.0.0",
+        "api_version": API_VERSION,
+        "name": "SRA Incident Response Backend"
+    }
+
+
+@app.get("/status", response_model=SystemStatusResponse)
+async def system_status(auth: bool = Depends(verify_api_key)) -> SystemStatusResponse:
     """Get overall system status."""
     active_incident = incident_manager.get_active_incident()
     trend = stability_evaluator.get_stability_trend()
 
-    return {
-        "status": "operational",
-        "timestamp": datetime.utcnow().isoformat(),
-        "active_incident": active_incident.id if active_incident else None,
-        "stability_trend": trend,
-        "buffer_stats": {
-            "logs": len(ingestion_buffer.logs),
-            "metrics": len(ingestion_buffer.metrics),
-            "snapshots": len(ingestion_buffer.snapshots)
-        }
-    }
+    return SystemStatusResponse(
+        status="operational",
+        timestamp=utc_now().isoformat(),
+        active_incident=active_incident.id if active_incident else None,
+        stability_trend=trend,
+        buffer_stats=BufferStats(
+            logs=len(ingestion_buffer.logs),
+            metrics=len(ingestion_buffer.metrics),
+            snapshots=len(ingestion_buffer.snapshots)
+        )
+    )
 
 
 # ============================================================================
 # Log & Metrics Ingestion Endpoints
 # ============================================================================
 
-@app.post("/ingest/logs")
+@app.post("/ingest/logs", response_model=IngestionResponse)
 async def ingest_logs(
     request: LogIngestionRequest,
-    background_tasks: BackgroundTasks,
     auth: bool = Depends(verify_api_key)
-):
+) -> IngestionResponse:
     """Ingest log entries."""
     ingestion_buffer.add_logs(request.logs)
 
-    # Check for anomalies in background
-    background_tasks.add_task(check_for_anomalies)
+    # LLM-based anomaly detection runs in the scheduled 5-minute loop
+    # Not triggered on every ingest to avoid excessive API calls
 
-    return {
-        "status": "accepted",
-        "count": len(request.logs),
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return IngestionResponse(
+        status="accepted",
+        count=len(request.logs),
+        timestamp=utc_now().isoformat()
+    )
 
 
-@app.post("/ingest/logs/raw")
+@app.post("/ingest/logs/raw", response_model=IngestionResponse)
 async def ingest_raw_logs(
     raw_logs: List[str],
     source: Optional[str] = None,
-    background_tasks: BackgroundTasks = None,
     auth: bool = Depends(verify_api_key)
-):
+) -> IngestionResponse:
     """Ingest raw log strings (parsed automatically)."""
     parsed = []
     for raw in raw_logs:
@@ -227,22 +300,18 @@ async def ingest_raw_logs(
 
     ingestion_buffer.add_logs(parsed)
 
-    if background_tasks:
-        background_tasks.add_task(check_for_anomalies)
-
-    return {
-        "status": "accepted",
-        "count": len(parsed),
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return IngestionResponse(
+        status="accepted",
+        count=len(parsed),
+        timestamp=utc_now().isoformat()
+    )
 
 
-@app.post("/ingest/metrics")
+@app.post("/ingest/metrics", response_model=IngestionResponse)
 async def ingest_metrics(
     request: MetricIngestionRequest,
-    background_tasks: BackgroundTasks,
     auth: bool = Depends(verify_api_key)
-):
+) -> IngestionResponse:
     """Ingest metric entries."""
     ingestion_buffer.add_metrics(request.metrics)
 
@@ -250,32 +319,35 @@ async def ingest_metrics(
     snapshot = MetricsNormalizer.normalize(request.metrics)
     ingestion_buffer.add_snapshot(snapshot)
 
-    # Check for anomalies
-    background_tasks.add_task(check_for_anomalies)
-
-    return {
-        "status": "accepted",
-        "count": len(request.metrics),
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return IngestionResponse(
+        status="accepted",
+        count=len(request.metrics),
+        timestamp=utc_now().isoformat()
+    )
 
 
-@app.post("/ingest/snapshot")
+@app.post("/ingest/snapshot", response_model=IngestionResponse)
 async def ingest_snapshot(
     request: MetricsSnapshotRequest,
-    background_tasks: BackgroundTasks,
     auth: bool = Depends(verify_api_key)
-):
+) -> IngestionResponse:
     """Ingest a metrics snapshot directly."""
     ingestion_buffer.add_snapshot(request.snapshot)
 
-    # Check for anomalies
-    background_tasks.add_task(check_for_anomalies)
+    return IngestionResponse(
+        status="accepted",
+        count=1,
+        timestamp=utc_now().isoformat()
+    )
 
-    return {
-        "status": "accepted",
-        "timestamp": datetime.utcnow().isoformat()
-    }
+
+@app.post("/monitoring/trigger")
+async def trigger_monitoring_check(
+    auth: bool = Depends(verify_api_key)
+):
+    """Manually trigger the LLM-based monitoring check."""
+    await check_for_anomalies()
+    return {"status": "triggered", "message": "Monitoring check completed"}
 
 
 # ============================================================================
@@ -403,89 +475,37 @@ async def set_stability_baseline(
 # Auto-Healing Endpoints
 # ============================================================================
 
-@app.post("/autoheal/restart")
-async def autoheal_restart(
+# Map action names to HealingAction enum
+AUTOHEAL_ACTION_MAP = {
+    "restart": HealingAction.RESTART_SERVICE,
+    "scale": HealingAction.SCALE_REPLICAS,
+    "flush": HealingAction.FLUSH_CACHE,
+    "clear-queue": HealingAction.CLEAR_QUEUE,
+    "reroute": HealingAction.REROUTE_TRAFFIC,
+    "rollback": HealingAction.ROLLBACK_DEPLOYMENT,
+}
+
+
+@app.post("/autoheal/{action}")
+async def execute_autoheal_action(
+    action: str,
     request: AutoHealRequest,
     auth: bool = Depends(verify_api_key)
 ):
-    """Restart a service."""
+    """
+    Execute an auto-healing action.
+
+    Available actions: restart, scale, flush, clear-queue, reroute, rollback
+    """
+    healing_action = AUTOHEAL_ACTION_MAP.get(action)
+    if not healing_action:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown action: {action}. Available: {', '.join(AUTOHEAL_ACTION_MAP.keys())}"
+        )
+
     result = await autoheal_executor.execute(
-        action=HealingAction.RESTART_SERVICE,
-        service=request.service,
-        parameters=request.parameters,
-        incident_id=request.incident_id
-    )
-    return result
-
-
-@app.post("/autoheal/scale")
-async def autoheal_scale(
-    request: AutoHealRequest,
-    auth: bool = Depends(verify_api_key)
-):
-    """Scale service replicas."""
-    result = await autoheal_executor.execute(
-        action=HealingAction.SCALE_REPLICAS,
-        service=request.service,
-        parameters=request.parameters,
-        incident_id=request.incident_id
-    )
-    return result
-
-
-@app.post("/autoheal/flush")
-async def autoheal_flush(
-    request: AutoHealRequest,
-    auth: bool = Depends(verify_api_key)
-):
-    """Flush cache."""
-    result = await autoheal_executor.execute(
-        action=HealingAction.FLUSH_CACHE,
-        service=request.service,
-        parameters=request.parameters,
-        incident_id=request.incident_id
-    )
-    return result
-
-
-@app.post("/autoheal/clear-queue")
-async def autoheal_clear_queue(
-    request: AutoHealRequest,
-    auth: bool = Depends(verify_api_key)
-):
-    """Clear a message queue."""
-    result = await autoheal_executor.execute(
-        action=HealingAction.CLEAR_QUEUE,
-        service=request.service,
-        parameters=request.parameters,
-        incident_id=request.incident_id
-    )
-    return result
-
-
-@app.post("/autoheal/reroute")
-async def autoheal_reroute(
-    request: AutoHealRequest,
-    auth: bool = Depends(verify_api_key)
-):
-    """Reroute traffic."""
-    result = await autoheal_executor.execute(
-        action=HealingAction.REROUTE_TRAFFIC,
-        service=request.service,
-        parameters=request.parameters,
-        incident_id=request.incident_id
-    )
-    return result
-
-
-@app.post("/autoheal/rollback")
-async def autoheal_rollback(
-    request: AutoHealRequest,
-    auth: bool = Depends(verify_api_key)
-):
-    """Rollback deployment."""
-    result = await autoheal_executor.execute(
-        action=HealingAction.ROLLBACK_DEPLOYMENT,
+        action=healing_action,
         service=request.service,
         parameters=request.parameters,
         incident_id=request.incident_id
@@ -617,6 +637,444 @@ async def send_custom_notification(
 
 
 # ============================================================================
+# Slack App Integration Endpoints
+# ============================================================================
+
+@app.get("/slack/install")
+async def slack_install(
+    user: UserDB = Depends(get_current_user)
+):
+    """
+    Get Slack installation URL.
+    Redirect user to this URL to add the bot to their workspace.
+    """
+    # Use user ID as state to link installation to user
+    install_url = slack_app.get_install_url(state=user.id)
+    return {"install_url": install_url}
+
+
+@app.get("/slack/oauth/callback")
+async def slack_oauth_callback(
+    code: str,
+    state: Optional[str] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Handle OAuth callback from Slack.
+    Exchanges code for tokens and stores workspace credentials.
+    """
+    try:
+        # Exchange code for tokens
+        oauth_result = await slack_app.handle_oauth_callback(code)
+
+        team_id = oauth_result["team_id"]
+
+        # Validate state is a real user ID (if provided)
+        user_id = None
+        if state:
+            result = await db.execute(
+                select(UserDB).where(UserDB.id == state)
+            )
+            user = result.scalar_one_or_none()
+            if user:
+                user_id = state
+
+        # Check if workspace already exists
+        result = await db.execute(
+            select(SlackWorkspaceDB).where(SlackWorkspaceDB.team_id == team_id)
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            # Update existing workspace
+            existing.bot_token = oauth_result["bot_token"]
+            existing.team_name = oauth_result["team_name"]
+            existing.bot_user_id = oauth_result["bot_user_id"]
+            existing.scopes = oauth_result["scopes"]
+            existing.is_active = True
+            if user_id:
+                existing.user_id = user_id
+        else:
+            # Create new workspace record
+            workspace = SlackWorkspaceDB(
+                team_id=team_id,
+                team_name=oauth_result["team_name"],
+                bot_token=oauth_result["bot_token"],
+                bot_user_id=oauth_result["bot_user_id"],
+                user_id=user_id,  # Can be None if no valid user
+                scopes=oauth_result["scopes"],
+                access_token=oauth_result.get("user_token")
+            )
+            db.add(workspace)
+
+        await db.commit()
+
+        logger.info(f"Slack workspace installed: {oauth_result['team_name']} ({team_id})")
+
+        # Auto-join #incidents channel and send welcome message
+        bot_token = oauth_result["bot_token"]
+        joined_channel = await slack_app.auto_join_incidents_channel(bot_token)
+        if joined_channel:
+            await slack_app.send_welcome_message(bot_token, joined_channel)
+            logger.info(f"Auto-joined and sent welcome to channel: {joined_channel}")
+
+        return {
+            "success": True,
+            "team_id": team_id,
+            "team_name": oauth_result["team_name"],
+            "joined_channel": joined_channel,
+            "message": "Slack workspace connected successfully!"
+        }
+
+    except Exception as e:
+        logger.error(f"Slack OAuth failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"OAuth failed: {str(e)}")
+
+
+@app.post("/slack/events")
+async def slack_events(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Handle Slack Events API requests.
+    Receives events like mentions, messages, etc.
+    """
+    body = await request.body()
+    data = json.loads(body)
+
+    # Handle URL verification challenge FIRST (before signature check)
+    if data.get("type") == "url_verification":
+        return {"challenge": data.get("challenge")}
+
+    # Verify request is from Slack
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+
+    if not slack_app.verify_request(timestamp, signature, body):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    # Handle events
+    if data.get("type") == "event_callback":
+        event = data.get("event", {})
+        team_id = data.get("team_id")
+        logger.info(f"Slack event received: {event.get('type')} from {team_id}")
+
+        # Get workspace token using helper
+        workspace = await get_active_workspace(team_id, db)
+
+        if not workspace:
+            logger.warning(f"Event from unknown workspace: {team_id}")
+            return {"ok": True}
+
+        # Handle the event
+        await slack_event_handler.handle_event(
+            event=event,
+            team_id=team_id,
+            bot_token=workspace.bot_token,
+            db=db
+        )
+
+    return {"ok": True}
+
+
+@app.post("/slack/commands")
+async def slack_commands(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Handle Slack slash commands.
+    Commands: /sra-check, /sra-status, /sra-incidents, /sra-rca
+    """
+    body = await request.body()
+
+    # Verify request is from Slack
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+
+    if not slack_app.verify_request(timestamp, signature, body):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    # Parse form data
+    form = await request.form()
+    command = form.get("command", "")
+    text = form.get("text", "")
+    user_id = form.get("user_id", "")
+    channel_id = form.get("channel_id", "")
+    team_id = form.get("team_id", "")
+    response_url = form.get("response_url", "")
+
+    # Get workspace token using helper
+    workspace = await get_active_workspace(team_id, db)
+
+    if not workspace:
+        return {"response_type": "ephemeral", "text": "Workspace not configured. Please reinstall the app."}
+
+    # Handle the command
+    response = await slack_command_handler.handle_command(
+        command=command,
+        text=text,
+        user_id=user_id,
+        channel_id=channel_id,
+        team_id=team_id,
+        response_url=response_url,
+        bot_token=workspace.bot_token,
+        db=db
+    )
+
+    return JSONResponse(content=response)
+
+
+@app.post("/slack/interactions")
+async def slack_interactions(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Handle Slack interactive components (button clicks, etc.)
+    """
+    body = await request.body()
+
+    # Verify request
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+
+    if not slack_app.verify_request(timestamp, signature, body):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    form = await request.form()
+    payload = json.loads(form.get("payload", "{}"))
+
+    action_type = payload.get("type")
+    team_id = payload.get("team", {}).get("id")
+
+    # Get workspace token using helper
+    workspace = await get_active_workspace(team_id, db)
+
+    if not workspace:
+        return {"text": "Workspace not configured"}
+
+    # Handle button actions
+    if action_type == "block_actions":
+        actions = payload.get("actions", [])
+        channel = payload.get("channel", {}).get("id")
+
+        for action in actions:
+            action_id = action.get("action_id")
+            value = action.get("value")
+
+            if action_id == "view_incident":
+                incident = incident_manager.get_incident(value)
+                if incident:
+                    await slack_app.send_incident_alert(
+                        bot_token=workspace.bot_token,
+                        channel=channel,
+                        incident=incident.model_dump()
+                    )
+
+            elif action_id == "check_logs":
+                logs = ingestion_buffer.get_recent_logs(minutes=15)
+                error_logs = [
+                    {
+                        "timestamp": l.timestamp.isoformat() if l.timestamp else "",
+                        "level": l.level.value,
+                        "service": l.service or "unknown",
+                        "message": l.message
+                    }
+                    for l in logs if l.level.value in ["error", "critical", "warning"]
+                ]
+                await slack_app.send_log_check_response(
+                    bot_token=workspace.bot_token,
+                    channel=channel,
+                    logs=error_logs
+                )
+
+            elif action_id == "ack_incident":
+                # Acknowledge incident
+                await slack_app.send_message(
+                    bot_token=workspace.bot_token,
+                    channel=channel,
+                    text=f":white_check_mark: Incident `{value[:8]}` acknowledged by <@{payload.get('user', {}).get('id')}>"
+                )
+
+            elif action_id == "execute_autoheal":
+                # Execute auto-healing for the incident
+                incident = incident_manager.get_incident(value)
+                if incident:
+                    user_name = payload.get('user', {}).get('name', 'unknown')
+                    await slack_app.send_message(
+                        bot_token=workspace.bot_token,
+                        channel=channel,
+                        text=f":gear: *Auto-fix initiated* by <@{payload.get('user', {}).get('id')}> for incident `{value[:8]}`\nExecuting recommended actions..."
+                    )
+
+                    # Execute the automatable actions
+                    executed_actions = []
+                    for action in incident.recommended_actions:
+                        if action.automated and not action.executed:
+                            result = await execute_autoheal_for_action(action, value)
+                            executed_actions.append({
+                                "action": action.action_type,
+                                "service": action.service,
+                                "success": result.get("success", False),
+                                "message": result.get("message", "")
+                            })
+
+                    # Report results
+                    if executed_actions:
+                        results_text = "\n".join([
+                            f"{'✅' if a['success'] else '❌'} *{a['action']}*" +
+                            (f" (`{a['service']}`)" if a['service'] else "") +
+                            f": {a['message']}"
+                            for a in executed_actions
+                        ])
+                        await slack_app.send_message(
+                            bot_token=workspace.bot_token,
+                            channel=channel,
+                            text=f":wrench: *Auto-fix Results:*\n{results_text}"
+                        )
+                    else:
+                        await slack_app.send_message(
+                            bot_token=workspace.bot_token,
+                            channel=channel,
+                            text=":warning: No automatable actions found or all already executed."
+                        )
+
+            elif action_id == "resolve_incident":
+                # Mark incident as resolved
+                incident = incident_manager.get_incident(value)
+                if incident:
+                    incident_manager.resolve_incident(value, summary="Resolved via Slack")
+                    await slack_app.send_message(
+                        bot_token=workspace.bot_token,
+                        channel=channel,
+                        text=f":white_check_mark: Incident `{value[:8]}` marked as *resolved* by <@{payload.get('user', {}).get('id')}>"
+                    )
+
+            elif action_id == "dismiss_incident":
+                # Dismiss/close the incident without resolving
+                await slack_app.send_message(
+                    bot_token=workspace.bot_token,
+                    channel=channel,
+                    text=f":x: Incident `{value[:8]}` dismissed by <@{payload.get('user', {}).get('id')}>"
+                )
+
+    return {"ok": True}
+
+
+async def execute_autoheal_for_action(action, incident_id: str) -> Dict[str, Any]:
+    """Execute a single autoheal action."""
+    from integrations.autoheal import autoheal_executor, HealingAction
+
+    action_type_map = {
+        "restart_service": HealingAction.RESTART_SERVICE,
+        "scale_replicas": HealingAction.SCALE_REPLICAS,
+        "flush_cache": HealingAction.FLUSH_CACHE,
+        "clear_queue": HealingAction.CLEAR_QUEUE,
+        "reroute_traffic": HealingAction.REROUTE_TRAFFIC,
+        "rollback_deployment": HealingAction.ROLLBACK_DEPLOYMENT,
+        "clear_disk": HealingAction.CLEAR_DISK,
+    }
+
+    healing_action = action_type_map.get(action.action_type)
+    if not healing_action:
+        return {"success": False, "message": f"Unknown action type: {action.action_type}"}
+
+    try:
+        result = await autoheal_executor.execute(
+            action=healing_action,
+            service=action.service,
+            parameters=action.parameters or {},
+            incident_id=incident_id
+        )
+        if result.get("success"):
+            action.executed = True
+            action.result = result.get("message")
+        return result
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@app.get("/slack/workspaces")
+async def list_slack_workspaces(
+    user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """List Slack workspaces connected by this user."""
+    result = await db.execute(
+        select(SlackWorkspaceDB).where(SlackWorkspaceDB.user_id == user.id)
+    )
+    workspaces = result.scalars().all()
+
+    return [
+        {
+            "team_id": w.team_id,
+            "team_name": w.team_name,
+            "default_channel": w.default_channel,
+            "installed_at": w.installed_at.isoformat() if w.installed_at else None,
+            "is_active": w.is_active
+        }
+        for w in workspaces
+    ]
+
+
+@app.delete("/slack/workspaces/{team_id}")
+async def disconnect_slack_workspace(
+    team_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Disconnect a Slack workspace and uninstall the bot."""
+    result = await db.execute(
+        select(SlackWorkspaceDB).where(SlackWorkspaceDB.team_id == team_id)
+    )
+    workspace = result.scalar_one_or_none()
+
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    # Uninstall the app from the Slack workspace
+    if workspace.bot_token:
+        uninstall_result = await slack_app.uninstall_app(workspace.bot_token)
+        if not uninstall_result.get("ok"):
+            logger.warning(f"Could not uninstall from Slack: {uninstall_result.get('error')}")
+
+    # Delete the workspace record from our database
+    await db.delete(workspace)
+    await db.commit()
+
+    logger.info(f"Slack workspace disconnected and uninstalled: {workspace.team_name} ({team_id})")
+    return {"status": "disconnected", "team_id": team_id, "uninstalled": True}
+
+
+@app.post("/slack/workspaces/{team_id}/test")
+async def test_slack_connection(
+    team_id: str,
+    channel: Optional[str] = None,
+    user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Send a test message to verify Slack connection."""
+    workspace = await get_active_workspace(team_id, db, user_id=user.id)
+
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found or inactive")
+
+    target_channel = channel or workspace.default_channel
+
+    response = await slack_app.send_message(
+        bot_token=workspace.bot_token,
+        channel=target_channel,
+        text=":wave: Test message from SRA Incident Response System!"
+    )
+
+    if response.get("ok"):
+        return {"success": True, "channel": target_channel}
+    else:
+        return {"success": False, "error": response.get("error")}
+
+
+# ============================================================================
 # Mock Data / Testing Endpoints
 # ============================================================================
 
@@ -726,9 +1184,13 @@ async def register(request: UserRegisterRequest, db: AsyncSession = Depends(get_
     await db.commit()
     await db.refresh(user)
 
-    # Create session token
+    # Create session token with expiration
     token = generate_token()
-    session = SessionTokenDB(token=token, user_id=user.id)
+    session = SessionTokenDB(
+        token=token,
+        user_id=user.id,
+        expires_at=get_token_expiry()
+    )
     db.add(session)
     await db.commit()
 
@@ -753,15 +1215,20 @@ async def login(request: UserLoginRequest, db: AsyncSession = Depends(get_db)):
     )
     user = result.scalar_one_or_none()
 
-    if not user or user.password_hash != hash_password(request.password):
+    # Use secure password verification (#3 fix)
+    if not user or not verify_password(request.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account disabled")
 
-    # Create session token
+    # Create session token with expiration
     token = generate_token()
-    session = SessionTokenDB(token=token, user_id=user.id)
+    session = SessionTokenDB(
+        token=token,
+        user_id=user.id,
+        expires_at=get_token_expiry()
+    )
     db.add(session)
     await db.commit()
 
@@ -806,6 +1273,71 @@ async def get_me(user: UserDB = Depends(get_current_user)):
     )
 
 
+@app.get("/account/overview", response_model=AccountOverviewResponse)
+async def get_account_overview(
+    user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+) -> AccountOverviewResponse:
+    """Get full account overview including all integrations."""
+    # Get API keys
+    api_keys_result = await db.execute(
+        select(APIKeyDB).where(APIKeyDB.user_id == user.id)
+    )
+    api_keys = api_keys_result.scalars().all()
+
+    # Get Slack workspaces
+    slack_result = await db.execute(
+        select(SlackWorkspaceDB).where(SlackWorkspaceDB.user_id == user.id)
+    )
+    slack_workspaces = slack_result.scalars().all()
+
+    return AccountOverviewResponse(
+        user=UserOverview(
+            id=user.id,
+            email=user.email,
+            created_at=user.created_at.isoformat() if user.created_at else None,
+            is_active=user.is_active,
+            subscription=SubscriptionInfo(
+                tier=user.subscription_tier,
+                status=user.subscription_status,
+                expires=user.subscription_expires.isoformat() if user.subscription_expires else None
+            )
+        ),
+        integrations=AccountIntegrations(
+            slack=SlackIntegrationStatus(
+                connected=len([w for w in slack_workspaces if w.is_active]) > 0,
+                workspaces=[
+                    SlackWorkspaceResponse(
+                        team_id=w.team_id,
+                        team_name=w.team_name,
+                        default_channel=w.default_channel,
+                        installed_at=w.installed_at.isoformat() if w.installed_at else None,
+                        is_active=w.is_active
+                    )
+                    for w in slack_workspaces
+                ]
+            ),
+            discord=IntegrationStatus(connected=False),
+            jira=IntegrationStatus(connected=False),
+            pagerduty=IntegrationStatus(connected=False)
+        ),
+        api_keys=APIKeysOverview(
+            count=len(api_keys),
+            max_allowed=config.MAX_API_KEYS_PER_USER,
+            keys=[
+                APIKeyInfo(
+                    name=k.name,
+                    key_preview=k.key[:12] + "...",
+                    created_at=k.created_at.isoformat() if k.created_at else None,
+                    last_used=k.last_used.isoformat() if k.last_used else None,
+                    is_active=k.is_active
+                )
+                for k in api_keys
+            ]
+        )
+    )
+
+
 # ============================================================================
 # API Key Management Endpoints
 # ============================================================================
@@ -823,10 +1355,10 @@ async def create_api_key(
     )
     key_count = result.scalar()
 
-    if key_count >= MAX_API_KEYS_PER_USER:
+    if key_count >= config.MAX_API_KEYS_PER_USER:
         raise HTTPException(
             status_code=400,
-            detail=f"Maximum {MAX_API_KEYS_PER_USER} API keys allowed per user"
+            detail=f"Maximum {config.MAX_API_KEYS_PER_USER} API keys allowed per user"
         )
 
     # Create key
@@ -926,28 +1458,241 @@ async def delete_api_key(
 # Background Tasks
 # ============================================================================
 
+async def notify_background_error(task_name: str, error: str, context: Dict[str, Any] = None):
+    """Send notification when a background task fails."""
+    try:
+        # Log the error
+        logger.error(f"Background task '{task_name}' failed: {error}", context or {})
+
+        # Send to Slack if configured
+        if config.SLACK_WEBHOOK_URL:
+            import httpx
+            payload = {
+                "text": f":warning: Background Task Error",
+                "attachments": [{
+                    "color": "#ff0000",
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "fields": [
+                                {"type": "mrkdwn", "text": f"*Task:*\n{task_name}"},
+                                {"type": "mrkdwn", "text": f"*Time:*\n{utc_now().strftime('%Y-%m-%d %H:%M UTC')}"}
+                            ]
+                        },
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": f"*Error:*\n```{error[:500]}```"}
+                        }
+                    ]
+                }]
+            }
+            async with httpx.AsyncClient() as client:
+                await client.post(config.SLACK_WEBHOOK_URL, json=payload)
+    except Exception as notify_error:
+        logger.error(f"Failed to send background error notification: {str(notify_error)}")
+
+
+async def continuous_monitoring_loop():
+    """
+    Continuous monitoring loop that runs periodically.
+
+    Flow:
+    1. Check for anomalies in logs/metrics via LLM
+    2. If anomaly detected → Create incident → Alert Slack with RCA
+    3. User can click "Execute Auto-Fix" to run healing actions
+    4. If no anomalies → Loop continues
+    """
+    # Use env var for interval, default 5 minutes (300s), use 30s for testing
+    import os
+    monitoring_interval = int(os.getenv("MONITORING_INTERVAL", "300"))
+    logger.info(f"Monitoring interval set to {monitoring_interval} seconds")
+
+    while True:
+        try:
+            await check_for_anomalies()
+        except Exception as e:
+            logger.error(f"Monitoring loop error: {str(e)}")
+
+        await asyncio.sleep(monitoring_interval)
+
+
 async def check_for_anomalies():
-    """Background task to check for anomalies and trigger incidents."""
-    recent_logs = ingestion_buffer.get_recent_logs(minutes=5)
-    recent_snapshots = ingestion_buffer.get_recent_snapshots(count=3)
-    latest_snapshot = recent_snapshots[-1] if recent_snapshots else None
+    """
+    Check for anomalies using LLM and trigger incident workflow.
 
-    detection = anomaly_detector.detect(logs=recent_logs, metrics=latest_snapshot)
+    The LLM analyzes logs/metrics and returns:
+    - anomaly_detected: true/false
+    - If true: severity, title, root_cause, recommended_actions
+    """
+    try:
+        recent_logs = ingestion_buffer.get_recent_logs(minutes=5)
+        recent_snapshots = ingestion_buffer.get_recent_snapshots(count=5)
 
-    if detection.detected:
+        # Skip if no data to analyze
+        if not recent_logs and not recent_snapshots:
+            logger.debug("No data to analyze, skipping monitoring check")
+            return
+
         # Check if we already have an active incident
         active = incident_manager.get_active_incident()
-        if not active:
-            # Create new incident
-            incident = incident_manager.create_incident(
-                title=f"Detected: {detection.anomaly_type}",
-                description=detection.description,
-                severity=detection.severity,
-                anomaly=detection,
-                logs=recent_logs,
-                metrics=recent_snapshots
+        if active:
+            logger.debug(f"Active incident exists: {active.id}, skipping monitoring")
+            return
+
+        # Call LLM to analyze system health
+        logger.info("Running LLM-based system monitoring...")
+        llm_result = await agent_client.monitor_system(
+            logs=recent_logs,
+            metrics=recent_snapshots
+        )
+
+        if llm_result is None:
+            # No anomaly detected OR LLM not configured
+            logger.info("LLM monitoring: System healthy (no anomalies detected)")
+            return
+
+        # LLM detected an anomaly - create incident with LLM's analysis
+        logger.info(f"LLM detected anomaly: {llm_result.get('title')}")
+
+        # Map severity string to enum
+        severity_map = {
+            "low": IncidentSeverity.LOW,
+            "medium": IncidentSeverity.MEDIUM,
+            "high": IncidentSeverity.HIGH,
+            "critical": IncidentSeverity.CRITICAL
+        }
+        severity = severity_map.get(llm_result.get("severity", "medium").lower(), IncidentSeverity.MEDIUM)
+
+        # Create incident with LLM's findings
+        incident = incident_manager.create_incident(
+            title=llm_result.get("title", "Issue detected by monitoring"),
+            description=llm_result.get("summary", ""),
+            severity=severity,
+            logs=recent_logs,
+            metrics=recent_snapshots
+        )
+
+        # Set RCA from LLM response
+        from core import RCAResult, RecoveryAction
+        rca = RCAResult(
+            root_cause=llm_result.get("root_cause", "See LLM analysis"),
+            contributing_factors=llm_result.get("contributing_factors", []),
+            evidence=[],
+            confidence=0.8
+        )
+        incident_manager.set_rca(incident.id, rca)
+
+        # Convert LLM actions to RecoveryAction objects
+        actions = []
+        for action_data in llm_result.get("recommended_actions", []):
+            action_type = action_data.get("action", "unknown")
+            # Check if this action type is automatable
+            automatable = action_type in [
+                "restart_service", "scale_replicas", "flush_cache",
+                "clear_queue", "rollback_deployment", "reroute_traffic", "clear_disk"
+            ]
+            actions.append(RecoveryAction(
+                action_type=action_type,
+                description=action_data.get("reason", ""),
+                service=action_data.get("service"),
+                automated=automatable
+            ))
+
+        for action in actions:
+            incident_manager.add_recommended_action(incident.id, action)
+
+        logger.info(f"Created incident from LLM analysis: {incident.id}")
+
+        # Broadcast incident alert to Slack
+        await broadcast_incident_to_all_workspaces(incident)
+
+        # Send RCA results with autoheal button
+        await broadcast_rca_to_all_workspaces(
+            incident=incident,
+            rca=rca,
+            actions=actions
+        )
+
+    except Exception as e:
+        await notify_background_error(
+            "check_for_anomalies",
+            str(e),
+            {"log_count": len(ingestion_buffer.logs)}
+        )
+
+
+async def broadcast_incident_to_all_workspaces(incident):
+    """Broadcast an incident alert to all connected Slack workspaces."""
+    try:
+        async with async_session() as db:
+            # Get all active workspaces
+            result = await db.execute(
+                select(SlackWorkspaceDB).where(SlackWorkspaceDB.is_active == True)
             )
-            logger.info(f"Auto-created incident: {incident.id}")
+            workspaces = result.scalars().all()
+
+            for workspace in workspaces:
+                try:
+                    # Broadcast to all channels the bot is in for this workspace
+                    results = await slack_app.broadcast_incident_alert(
+                        bot_token=workspace.bot_token,
+                        incident=incident.model_dump() if hasattr(incident, 'model_dump') else incident,
+                        ping_everyone=True  # @channel ping
+                    )
+                    logger.info(f"Broadcast incident to {workspace.team_name}: {len(results)} channels")
+                except Exception as e:
+                    logger.error(f"Failed to broadcast to {workspace.team_name}: {str(e)}")
+
+    except Exception as e:
+        logger.error(f"Failed to broadcast incident: {str(e)}")
+
+
+async def broadcast_rca_to_all_workspaces(incident, rca, actions):
+    """
+    Broadcast RCA results with autoheal button to all connected Slack workspaces.
+
+    This sends a follow-up message with:
+    - Root cause analysis
+    - Recommended actions (automatable vs manual)
+    - "Execute Auto-Fix" button for user-controlled healing
+    """
+    try:
+        async with async_session() as db:
+            # Get all active workspaces
+            result = await db.execute(
+                select(SlackWorkspaceDB).where(SlackWorkspaceDB.is_active == True)
+            )
+            workspaces = result.scalars().all()
+
+            # Convert RCA and actions to dict format
+            rca_dict = rca.model_dump() if hasattr(rca, 'model_dump') else rca
+            actions_list = [
+                a.model_dump() if hasattr(a, 'model_dump') else a
+                for a in (actions or [])
+            ]
+
+            for workspace in workspaces:
+                try:
+                    # Get channels the bot is in
+                    channels = await slack_app.list_channels(workspace.bot_token)
+                    bot_channels = [c for c in channels if c.get("is_member")]
+
+                    for channel in bot_channels:
+                        await slack_app.send_rca_report(
+                            bot_token=workspace.bot_token,
+                            channel=channel.get("id"),
+                            incident_id=incident.id,
+                            rca=rca_dict,
+                            actions=actions_list,
+                            show_autoheal_button=True
+                        )
+
+                    logger.info(f"Broadcast RCA to {workspace.team_name}: {len(bot_channels)} channels")
+                except Exception as e:
+                    logger.error(f"Failed to broadcast RCA to {workspace.team_name}: {str(e)}")
+
+    except Exception as e:
+        logger.error(f"Failed to broadcast RCA: {str(e)}")
 
 
 async def run_agent_workflow(incident_id: str):
@@ -955,13 +1700,63 @@ async def run_agent_workflow(incident_id: str):
     try:
         await agent_orchestrator.run_rca_workflow(incident_id)
     except Exception as e:
-        logger.error(f"Agent workflow failed: {str(e)}")
+        await notify_background_error(
+            "run_agent_workflow",
+            str(e),
+            {"incident_id": incident_id}
+        )
 
 
 # ============================================================================
 # Run the application
 # ============================================================================
 
+def start_ngrok(port: int) -> str:
+    """Start ngrok tunnel and return the public URL."""
+    try:
+        from pyngrok import ngrok
+
+        # Start ngrok tunnel
+        public_url = ngrok.connect(port, "http").public_url
+
+        # Update Slack redirect URI if needed
+        slack_redirect = f"{public_url}/slack/oauth/callback"
+
+        print(f"\n{'='*60}")
+        print(f"  NGROK TUNNEL ACTIVE")
+        print(f"{'='*60}")
+        print(f"  Public URL:      {public_url}")
+        print(f"  Slack Redirect:  {slack_redirect}")
+        print(f"  Slack Events:    {public_url}/slack/events")
+        print(f"  Slack Commands:  {public_url}/slack/commands")
+        print(f"{'='*60}")
+        print(f"\n  Update these URLs in your Slack App settings!")
+        print(f"{'='*60}\n")
+
+        return public_url
+
+    except ImportError:
+        print("\n  [WARNING] pyngrok not installed. Run: pip install pyngrok")
+        print("  Starting without ngrok tunnel...\n")
+        return None
+    except Exception as e:
+        print(f"\n  [ERROR] Failed to start ngrok: {e}")
+        print("  Starting without ngrok tunnel...\n")
+        return None
+
+
 if __name__ == "__main__":
+    import argparse
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    parser = argparse.ArgumentParser(description="SRA Incident Response Backend")
+    parser.add_argument("--ngrok", action="store_true", help="Start with ngrok tunnel for Slack webhooks")
+    parser.add_argument("--port", type=int, default=8000, help="Port to run on (default: 8000)")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to (default: 0.0.0.0)")
+    args = parser.parse_args()
+
+    # Start ngrok if requested
+    if args.ngrok:
+        start_ngrok(args.port)
+
+    uvicorn.run(app, host=args.host, port=args.port)

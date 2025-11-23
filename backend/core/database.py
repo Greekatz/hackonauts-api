@@ -32,7 +32,13 @@ class UserDB(Base):
     created_at = Column(DateTime, default=lambda: datetime.utcnow())
     is_active = Column(Boolean, default=True)
 
+    # Subscription/billing info
+    subscription_tier = Column(String, default="free")  # free, pro, enterprise
+    subscription_status = Column(String, default="active")  # active, cancelled, expired
+    subscription_expires = Column(DateTime, nullable=True)
+
     api_keys = relationship("APIKeyDB", back_populates="user", cascade="all, delete-orphan")
+    slack_workspaces = relationship("SlackWorkspaceDB", back_populates="user", cascade="all, delete-orphan")
 
 
 class APIKeyDB(Base):
@@ -51,10 +57,10 @@ class APIKeyDB(Base):
 class SessionTokenDB(Base):
     __tablename__ = "session_tokens"
 
-    token = Column(String, primary_key=True)
+    token = Column(String, primary_key=True, index=True)  # Index for fast lookup
     user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
     created_at = Column(DateTime, default=lambda: datetime.utcnow())
-    expires_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True, index=True)  # Index for cleanup queries
 
 
 class IncidentDB(Base):
@@ -78,6 +84,27 @@ class IncidentDB(Base):
     actions_json = Column(Text, default="[]")
     stability_json = Column(Text, default="[]")
     agent_runs = Column(String, default="0")
+
+
+class SlackWorkspaceDB(Base):
+    """Stores Slack workspace tokens for multi-tenant installations."""
+    __tablename__ = "slack_workspaces"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    team_id = Column(String, unique=True, nullable=False, index=True)  # Slack workspace ID
+    team_name = Column(String, nullable=True)
+    bot_token = Column(String, nullable=False)  # xoxb-... token
+    bot_user_id = Column(String, nullable=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)  # User who installed
+    default_channel = Column(String, default="#incidents")
+    installed_at = Column(DateTime, default=lambda: datetime.utcnow())
+    is_active = Column(Boolean, default=True)
+
+    # Optional: store additional scopes/metadata
+    scopes = Column(Text, nullable=True)  # Comma-separated scopes
+    access_token = Column(String, nullable=True)  # User token if needed
+
+    user = relationship("UserDB", back_populates="slack_workspaces")
 
 
 # Engine and session factory
