@@ -3,15 +3,16 @@ FROM node:20-alpine AS frontend
 
 WORKDIR /app
 
+# Copy package files and install dependencies
 COPY frontend/package*.json ./
 RUN npm install
-COPY frontend/ ./
 
-# Build React app
+# Copy source code and build
+COPY frontend/ ./
 RUN npm run build
 
-# Verify build exists
-RUN ls -la /app/build
+# Verify build exists (Vite creates 'dist', not 'build')
+RUN ls -la /app/dist
 
 # ---------------------------
 # Step 2: Build FastAPI backend
@@ -28,7 +29,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ ./
 
 # Copy React build from frontend stage
-COPY --from=frontend /app/frontend/build ./frontend/build
+# Source: /app/dist (where Vite put it in Stage 1)
+# Dest: ./frontend/build (where your FastAPI likely expects it)
+COPY --from=frontend /app/dist ./frontend/build
 
 # Expose port
 EXPOSE 8000
