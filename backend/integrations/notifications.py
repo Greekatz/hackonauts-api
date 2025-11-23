@@ -7,102 +7,11 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+
 import httpx
 
 from core import Incident, IncidentSeverity, config, logger
 from engines import incident_manager
-
-
-class SlackNotifier:
-    """Slack webhook and bot integration."""
-
-    def __init__(self):
-        self.webhook_url = config.SLACK_WEBHOOK_URL
-        self.bot_token = config.SLACK_BOT_TOKEN
-        self.channel = config.SLACK_CHANNEL
-
-    async def send_webhook(self, message: str, attachments: Optional[List[Dict]] = None) -> bool:
-        """Send message via webhook."""
-        if not self.webhook_url:
-            logger.warning("Slack webhook URL not configured")
-            return False
-
-        payload = {
-            "text": message,
-            "attachments": attachments or []
-        }
-
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(self.webhook_url, json=payload)
-                return response.status_code == 200
-        except Exception as e:
-            logger.error(f"Slack webhook error: {str(e)}")
-            return False
-
-    async def send_incident_alert(self, incident: Incident) -> bool:
-        """Send formatted incident alert to Slack."""
-        severity_label = {
-            IncidentSeverity.LOW: "[LOW]",
-            IncidentSeverity.MEDIUM: "[MEDIUM]",
-            IncidentSeverity.HIGH: "[HIGH]",
-            IncidentSeverity.CRITICAL: "[CRITICAL]"
-        }
-
-        label = severity_label.get(incident.severity, "[UNKNOWN]")
-
-        attachments = [{
-            "color": self._severity_color(incident.severity),
-            "blocks": [
-                {
-                    "type": "header",
-                    "text": {
-                        "type": "plain_text",
-                        "text": f"{label} Incident: {incident.title}"
-                    }
-                },
-                {
-                    "type": "section",
-                    "fields": [
-                        {"type": "mrkdwn", "text": f"*Severity:*\n{incident.severity.value}"},
-                        {"type": "mrkdwn", "text": f"*Status:*\n{incident.status.value}"},
-                        {"type": "mrkdwn", "text": f"*ID:*\n{incident.id[:8]}"},
-                        {"type": "mrkdwn", "text": f"*Created:*\n{incident.created_at.strftime('%Y-%m-%d %H:%M UTC')}"}
-                    ]
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*Description:*\n{incident.description[:500] if incident.description else 'No description'}"
-                    }
-                }
-            ]
-        }]
-
-        if incident.rca:
-            attachments[0]["blocks"].append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Root Cause:*\n{incident.rca.root_cause[:500]}"
-                }
-            })
-
-        return await self.send_webhook(
-            message=f"New incident detected: {incident.title}",
-            attachments=attachments
-        )
-
-    def _severity_color(self, severity: IncidentSeverity) -> str:
-        colors = {
-            IncidentSeverity.LOW: "#36a64f",
-            IncidentSeverity.MEDIUM: "#ffcc00",
-            IncidentSeverity.HIGH: "#ff9900",
-            IncidentSeverity.CRITICAL: "#ff0000"
-        }
-        return colors.get(severity, "#808080")
 
 
 class DiscordNotifier:
@@ -200,7 +109,7 @@ class EmailNotifier:
             logger.error(f"Email send error: {str(e)}")
             return False
 
-    def _send_smtp(self, msg: MIMEMultipart):
+    def _send_smtp(self, msg: MIMEMultipart) -> None:
         """Synchronous SMTP send."""
         with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
             server.starttls()
@@ -420,7 +329,9 @@ class NotificationManager:
     """Unified notification manager."""
 
     def __init__(self):
-        self.slack = SlackNotifier()
+        # Import here to avoid circular imports
+        from .slack_app import slack_app
+        self.slack_app = slack_app
         self.discord = DiscordNotifier()
         self.email = EmailNotifier()
         self.jira = JiraClient()
@@ -430,7 +341,7 @@ class NotificationManager:
         self,
         incident_id: str,
         channels: Optional[List[str]] = None
-    ) -> Dict[str, bool]:
+    ) -> Dict[str, Any]:
         """Send notifications to specified channels."""
         incident = incident_manager.get_incident(incident_id)
         if not incident:
@@ -440,10 +351,11 @@ class NotificationManager:
         if channels is None:
             channels = ["slack", "discord", "email"]
 
-        results = {}
+        results: Dict[str, Any] = {}
 
         if "slack" in channels:
-            results["slack"] = await self.slack.send_incident_alert(incident)
+            # Use webhook for simple notifications
+            results["slack"] = await self._send_slack_webhook(incident)
 
         if "discord" in channels:
             results["discord"] = await self.discord.send_incident_alert(incident)
@@ -465,15 +377,78 @@ class NotificationManager:
 
         return results
 
+    async def _send_slack_webhook(self, incident: Incident) -> bool:
+        """Send incident alert via Slack webhook (simple integration)."""
+        webhook_url = config.SLACK_WEBHOOK_URL
+        if not webhook_url:
+            logger.warning("Slack webhook URL not configured")
+            return False
+
+        severity_colors = {
+            IncidentSeverity.LOW: "#36a64f",
+            IncidentSeverity.MEDIUM: "#ffcc00",
+            IncidentSeverity.HIGH: "#ff9900",
+            IncidentSeverity.CRITICAL: "#ff0000"
+        }
+
+        payload = {
+            "text": f"New incident detected: {incident.title}",
+            "attachments": [{
+                "color": severity_colors.get(incident.severity, "#808080"),
+                "blocks": [
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": f"[{incident.severity.value.upper()}] Incident: {incident.title}"
+                        }
+                    },
+                    {
+                        "type": "section",
+                        "fields": [
+                            {"type": "mrkdwn", "text": f"*Severity:*\n{incident.severity.value}"},
+                            {"type": "mrkdwn", "text": f"*Status:*\n{incident.status.value}"},
+                            {"type": "mrkdwn", "text": f"*ID:*\n{incident.id[:8]}"},
+                            {"type": "mrkdwn", "text": f"*Created:*\n{incident.created_at.strftime('%Y-%m-%d %H:%M UTC')}"}
+                        ]
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Description:*\n{incident.description[:500] if incident.description else 'No description'}"
+                        }
+                    }
+                ]
+            }]
+        }
+
+        if incident.rca:
+            payload["attachments"][0]["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Root Cause:*\n{incident.rca.root_cause[:500]}"
+                }
+            })
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(webhook_url, json=payload)
+                return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Slack webhook error: {str(e)}")
+            return False
+
     async def send_custom_message(
         self,
         channel: str,
         message: str,
-        **kwargs
+        **kwargs: Any
     ) -> bool:
         """Send a custom message to a specific channel."""
         if channel == "slack":
-            return await self.slack.send_webhook(message)
+            return await self._send_slack_custom(message)
         elif channel == "discord":
             return await self.discord.send(message)
         elif channel == "email":
@@ -481,6 +456,20 @@ class NotificationManager:
             return await self.email.send(subject, message)
         else:
             logger.warning(f"Unknown notification channel: {channel}")
+            return False
+
+    async def _send_slack_custom(self, message: str) -> bool:
+        """Send custom message to Slack via webhook."""
+        webhook_url = config.SLACK_WEBHOOK_URL
+        if not webhook_url:
+            return False
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(webhook_url, json={"text": message})
+                return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Slack webhook error: {str(e)}")
             return False
 
 

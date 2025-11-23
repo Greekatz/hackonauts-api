@@ -174,11 +174,12 @@ class LogParser:
 class IngestionBuffer:
     """In-memory buffer for logs and metrics with TTL."""
 
-    def __init__(self, max_size: int = 10000, ttl_minutes: int = 60):
-        self.max_size = max_size
-        self.ttl = timedelta(minutes=ttl_minutes)
-        self.logs: deque = deque(maxlen=max_size)
-        self.metrics: deque = deque(maxlen=max_size)
+    def __init__(self, max_size: int = None, ttl_minutes: int = None):
+        from core import config
+        self.max_size = max_size or config.INGESTION_BUFFER_MAX_SIZE
+        self.ttl = timedelta(minutes=ttl_minutes or config.INGESTION_BUFFER_TTL_MINUTES)
+        self.logs: deque = deque(maxlen=self.max_size)
+        self.metrics: deque = deque(maxlen=self.max_size)
         self.snapshots: deque = deque(maxlen=1000)
 
     def add_log(self, entry: LogEntry):

@@ -3,7 +3,7 @@ Data Models for the Incident Response Backend
 """
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 import uuid
 
@@ -32,7 +32,7 @@ class IncidentStatus(str, Enum):
 
 
 class LogEntry(BaseModel):
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.utcnow())
     level: LogLevel = LogLevel.INFO
     message: str
     source: Optional[str] = None
@@ -42,7 +42,7 @@ class LogEntry(BaseModel):
 
 
 class MetricEntry(BaseModel):
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.utcnow())
     name: str
     value: float
     unit: Optional[str] = None
@@ -51,7 +51,7 @@ class MetricEntry(BaseModel):
 
 
 class MetricsSnapshot(BaseModel):
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.utcnow())
     cpu_percent: Optional[float] = None
     memory_percent: Optional[float] = None
     latency_ms: Optional[float] = None
@@ -79,15 +79,16 @@ class RCAResult(BaseModel):
 class RecoveryAction(BaseModel):
     action_type: str
     description: str
+    service: Optional[str] = None  # Target service for the action
     parameters: Dict[str, Any] = Field(default_factory=dict)
-    automated: bool = False
+    automated: bool = False  # True if this can be auto-executed
     executed: bool = False
     result: Optional[str] = None
     executed_at: Optional[datetime] = None
 
 
 class StabilityReport(BaseModel):
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.utcnow())
     is_stable: bool = False
     metrics_ok: bool = False
     logs_ok: bool = False
@@ -98,8 +99,8 @@ class StabilityReport(BaseModel):
 
 class Incident(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
+    updated_at: datetime = Field(default_factory=lambda: datetime.utcnow())
     status: IncidentStatus = IncidentStatus.OPEN
     severity: IncidentSeverity = IncidentSeverity.MEDIUM
     title: str = ""
@@ -174,3 +175,157 @@ class ForceRCARequest(BaseModel):
     logs: Optional[List[LogEntry]] = None
     metrics: Optional[List[MetricsSnapshot]] = None
     description: Optional[str] = None
+
+
+# User Authentication
+class User(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    email: str
+    password_hash: str
+    created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
+    is_active: bool = True
+
+
+class UserRegisterRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    created_at: datetime
+    is_active: bool
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
+# API Key Management
+class APIKey(BaseModel):
+    key: str = Field(default_factory=lambda: f"sra_{uuid.uuid4().hex}")
+    name: str
+    user_id: str  # Links to user
+    created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
+    last_used: Optional[datetime] = None
+    is_active: bool = True
+
+
+class APIKeyCreateRequest(BaseModel):
+    name: str
+
+
+class APIKeyResponse(BaseModel):
+    key: str
+    name: str
+    created_at: datetime
+    is_active: bool
+
+
+# ============================================================================
+# API Response Models (for type safety and documentation)
+# ============================================================================
+
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: str
+
+
+class BufferStats(BaseModel):
+    logs: int
+    metrics: int
+    snapshots: int
+
+
+class SystemStatusResponse(BaseModel):
+    status: str
+    timestamp: str
+    active_incident: Optional[str] = None
+    stability_trend: str
+    buffer_stats: BufferStats
+
+
+class IngestionResponse(BaseModel):
+    status: str
+    count: int
+    timestamp: str
+
+
+class IncidentResponse(BaseModel):
+    id: str
+    title: str
+    status: str
+    severity: str
+    created_at: str
+    updated_at: str
+    duration_minutes: float
+    root_cause: Optional[str] = None
+    actions_taken: int
+    agent_runs: int
+    stability_trend: str
+    resolution_summary: Optional[str] = None
+
+
+class SlackWorkspaceResponse(BaseModel):
+    team_id: str
+    team_name: Optional[str] = None
+    default_channel: str
+    installed_at: Optional[str] = None
+    is_active: bool
+
+
+class IntegrationStatus(BaseModel):
+    connected: bool
+
+
+class SlackIntegrationStatus(IntegrationStatus):
+    workspaces: List[SlackWorkspaceResponse] = []
+
+
+class AccountIntegrations(BaseModel):
+    slack: SlackIntegrationStatus
+    discord: IntegrationStatus
+    jira: IntegrationStatus
+    pagerduty: IntegrationStatus
+
+
+class APIKeyInfo(BaseModel):
+    name: str
+    key_preview: str
+    created_at: Optional[str] = None
+    last_used: Optional[str] = None
+    is_active: bool
+
+
+class APIKeysOverview(BaseModel):
+    count: int
+    max_allowed: int
+    keys: List[APIKeyInfo]
+
+
+class SubscriptionInfo(BaseModel):
+    tier: str
+    status: str
+    expires: Optional[str] = None
+
+
+class UserOverview(BaseModel):
+    id: str
+    email: str
+    created_at: Optional[str] = None
+    is_active: bool
+    subscription: SubscriptionInfo
+
+
+class AccountOverviewResponse(BaseModel):
+    user: UserOverview
+    integrations: AccountIntegrations
+    api_keys: APIKeysOverview
