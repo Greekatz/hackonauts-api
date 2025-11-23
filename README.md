@@ -2,6 +2,8 @@
 
 An autonomous incident detection and response platform powered by IBM watsonx. The system ingests logs and metrics, detects anomalies, performs root cause analysis, and executes automated remediation actions.
 
+DEMO LINK: https://sra-858141841630.us-central1.run.app/
+
 ## Quick Start (For Users)
 
 ### 1. Create an Account
