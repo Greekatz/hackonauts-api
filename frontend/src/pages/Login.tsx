@@ -7,7 +7,6 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from '@/hooks/use-toast';
-import { login, register, setApiKey } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { Shield, Zap, Activity } from 'lucide-react';
 
