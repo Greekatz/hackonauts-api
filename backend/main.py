@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -124,6 +125,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+app.mount("/", StaticFiles(directory="frontend/build", html=True), name="frontend")
 
 # Add rate limit error handler
 app.state.limiter = limiter
